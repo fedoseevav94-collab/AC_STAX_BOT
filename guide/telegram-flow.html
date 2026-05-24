@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Инструкция по боту выдачи авто</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --tg-bg: #d7edc6;
+      --bot: #fff;
+      --user: #d9fdd3;
+      --text: #17212b;
+      --muted: #7d8a96;
+      --blue: #2481cc;
+      --line: #e3e8ee;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: #f3f6f8;
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+    }
+
+    main {
+      display: grid;
+      gap: 28px;
+      grid-template-columns: repeat(2, 390px);
+      padding: 32px;
+      width: max-content;
+    }
+
+    .phone {
+      width: 390px;
+      height: 844px;
+      background: var(--tg-bg);
+      border: 1px solid #cad5dd;
+      border-radius: 34px;
+      box-shadow: 0 18px 55px rgba(21, 35, 48, .18);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .top {
+      height: 78px;
+      background: #fff;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px 10px;
+      border-bottom: 1px solid #dbe2e8;
+    }
+
+    .avatar {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: #59bfb2;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-weight: 800;
+      letter-spacing: .5px;
+    }
+
+    .title {
+      font-weight: 700;
+      font-size: 18px;
+      line-height: 1.15;
+    }
+
+    .subtitle {
+      color: #8a929a;
+      font-size: 13px;
+      margin-top: 3px;
+    }
+
+    .chat {
+      height: calc(100% - 78px);
+      padding: 14px 12px 88px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .chat::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image:
+        radial-gradient(circle at 28px 30px, rgba(73, 130, 67, .13) 0 2px, transparent 3px),
+        radial-gradient(circle at 110px 78px, rgba(73, 130, 67, .10) 0 8px, transparent 9px),
+        radial-gradient(circle at 300px 120px, rgba(73, 130, 67, .10) 0 11px, transparent 12px);
+      background-size: 132px 132px;
+      pointer-events: none;
+    }
+
+    .content {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .date {
+      align-self: center;
+      color: #fff;
+      background: rgba(69, 137, 52, .82);
+      border-radius: 16px;
+      padding: 5px 12px;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .bubble {
+      max-width: 326px;
+      border-radius: 16px;
+      padding: 10px 12px;
+      font-size: 15px;
+      line-height: 1.28;
+      box-shadow: 0 1px 0 rgba(0, 0, 0, .06);
+      white-space: pre-line;
+    }
+
+    .bot {
+      align-self: flex-start;
+      background: var(--bot);
+      border-bottom-left-radius: 5px;
+    }
+
+    .user {
+      align-self: flex-end;
+      background: var(--user);
+      border-bottom-right-radius: 5px;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 4px;
+      text-align: right;
+    }
+
+    .keyboard {
+      display: grid;
+      gap: 7px;
+      margin-top: 10px;
+    }
+
+    .keyboard.two {
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .btn {
+      border: 1px solid #d8e4ee;
+      border-radius: 10px;
+      color: var(--blue);
+      background: #f8fbff;
+      font-weight: 650;
+      text-align: center;
+      padding: 9px 8px;
+      font-size: 14px;
+    }
+
+    .photos {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 3px;
+      overflow: hidden;
+      border-radius: 14px;
+      background: #fff;
+      padding: 3px;
+    }
+
+    .photo {
+      height: 96px;
+      background:
+        linear-gradient(145deg, rgba(255,255,255,.2), transparent),
+        linear-gradient(160deg, #a9c5d8, #e8eef2 52%, #656e77 53%, #9aa56d 54%, #c7d28e);
+      position: relative;
+    }
+
+    .photo::after {
+      content: "";
+      position: absolute;
+      left: 18px;
+      right: 18px;
+      bottom: 22px;
+      height: 30px;
+      border-radius: 17px 19px 7px 7px;
+      background: #fff;
+      border: 2px solid #d7dde2;
+      box-shadow: inset 42px 0 #f2c640, inset -28px 0 #2f3841;
+    }
+
+    .photo.dash {
+      background: radial-gradient(circle at 50% 55%, #202832 0 35%, #111923 36% 65%, #2a3541 66%);
+    }
+
+    .photo.dash::after {
+      content: "Топливо 62%";
+      inset: auto 20px 28px;
+      height: auto;
+      color: #dff6ff;
+      background: transparent;
+      border: 0;
+      box-shadow: none;
+      text-align: center;
+      font-size: 16px;
+      font-weight: 800;
+    }
+
+    .input {
+      position: absolute;
+      left: 10px;
+      right: 10px;
+      bottom: 14px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .field {
+      flex: 1;
+      height: 42px;
+      border-radius: 21px;
+      background: #fff;
+      color: #7b8790;
+      padding: 11px 16px;
+      font-size: 14px;
+    }
+
+    .send {
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      background: var(--blue);
+      color: #fff;
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+    }
+
+    .report {
+      background: #fff;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      font-size: 11px;
+      margin-top: 8px;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+    }
+
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #eef5fb;
+      color: #4d6475;
+      font-size: 10px;
+    }
+
+    .caption {
+      position: absolute;
+      top: 92px;
+      left: 18px;
+      right: 18px;
+      padding: 8px 12px;
+      border-radius: 12px;
+      background: rgba(255,255,255,.9);
+      border: 1px solid rgba(218,226,232,.95);
+      color: #40515e;
+      font-size: 13px;
+      font-weight: 650;
+      z-index: 2;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="phone" id="screen-1">
+    <div class="top"><div class="avatar">АС</div><div><div class="title">АС - авто сотрудникам</div><div class="subtitle">бот в группе</div></div></div>
+    <div class="chat"><div class="caption">1. Сотрудник открывает меню</div><div class="content">
+      <div class="date">Сегодня</div>
+      <div class="bubble user">/start<div class="small">09:10</div></div>
+      <div class="bubble bot">Выберите действие:
+        <div class="keyboard two"><div class="btn">Взять машину</div><div class="btn">Сдать машину</div></div>
+      </div>
+    </div><div class="input"><div class="field">Сообщение</div><div class="send">›</div></div></div>
+  </section>
+
+  <section class="phone" id="screen-2">
+    <div class="top"><div class="avatar">АС</div><div><div class="title">АС - авто сотрудникам</div><div class="subtitle">бот в группе</div></div></div>
+    <div class="chat"><div class="caption">2. Бот собирает заявку на выдачу</div><div class="content">
+      <div class="date">Сегодня</div>
+      <div class="bubble bot">Выберите марку авто:
+🟢 КОМФОРТ +
+🔵 КОМФОРТ
+🟡 ЭКОНОМ
+        <div class="keyboard">
+          <div class="btn">🟢 EXEED LX</div>
+          <div class="btn">🟢 Haval F7</div>
+          <div class="btn">🟢 Belgee X70</div>
+          <div class="btn">🟢 JAC J7</div>
+          <div class="btn">🔵 Chery Tiggo 4</div>
+          <div class="btn">🟡 Kia Rio</div>
+        </div>
+      </div>
+      <div class="bubble user">JAC J7</div>
+      <div class="bubble bot">Введите госномер, например: Н537РА126</div>
+      <div class="bubble user">Н537РА126</div>
+      <div class="bubble bot">Когда возврат? Например: завтра 18:30, 29 августа 20:00, 29.08.2026 12:00.</div>
+      <div class="bubble user">29 августа 20:00</div>
+      <div class="bubble bot">Посчитал срок аренды: 2 дн.</div>
+    </div><div class="input"><div class="field">Сообщение</div><div class="send">›</div></div></div>
+  </section>
+
+  <section class="phone" id="screen-3">
+    <div class="top"><div class="avatar">АС</div><div><div class="title">АС - авто сотрудникам</div><div class="subtitle">бот в группе</div></div></div>
+    <div class="chat"><div class="caption">3. Комментарий при взятии можно пропустить</div><div class="content">
+      <div class="date">Сегодня</div>
+      <div class="bubble bot">Комментарий при взятии необязателен. Если согласовали, напишите с кем. Можно пропустить.
+        <div class="keyboard"><div class="btn">Пропустить комментарий</div></div>
+      </div>
+      <div class="bubble user">Пропустить комментарий</div>
+      <div class="bubble bot">Ок, без комментария. Пришлите 5 фото: 4 стороны авто и 1 фото приборной панели, где виден уровень топлива.</div>
+    </div><div class="input"><div class="field">Сообщение</div><div class="send">›</div></div></div>
+  </section>
+
+  <section class="phone" id="screen-4">
+    <div class="top"><div class="avatar">АС</div><div><div class="title">АС - авто сотрудникам</div><div class="subtitle">бот в группе</div></div></div>
+    <div class="chat"><div class="caption">4. Сотрудник отправляет 5 фото, бот фиксирует заявку</div><div class="content">
+      <div class="date">Сегодня</div>
+      <div class="bubble user">
+        <div class="photos">
+          <div class="photo"></div><div class="photo"></div><div class="photo"></div><div class="photo"></div><div class="photo dash"></div>
+        </div>
+      </div>
+      <div class="bubble bot">Заявка на выдачу #18 зафиксирована: JAC J7 Н537РА126, 2 дн.
+Фото отправлены в рабочий чат.</div>
+      <div class="bubble bot">Если фото меньше 5, бот не зафиксирует заявку и попросит дослать полный комплект.</div>
+    </div><div class="input"><div class="field">Сообщение</div><div class="send">›</div></div></div>
+  </section>
+
+  <section class="phone" id="screen-5">
+    <div class="top"><div class="avatar">АС</div><div><div class="title">АС - авто сотрудникам</div><div class="subtitle">бот в группе</div></div></div>
+    <div class="chat"><div class="caption">5. При сдаче комментарий обязателен или кнопка исправности</div><div class="content">
+      <div class="date">Завтра</div>
+      <div class="bubble user">/car</div>
+      <div class="bubble bot">Выберите действие:
+        <div class="keyboard two"><div class="btn">Взять машину</div><div class="btn">Сдать машину</div></div>
+      </div>
+      <div class="bubble bot">Сдаем JAC J7 Н537РА126. Опишите недостатки машины или нажмите кнопку:
+        <div class="keyboard"><div class="btn">Машина полностью исправна</div></div>
+      </div>
+      <div class="bubble user">При разгоне от 80 км/ч сильно трясет машину. Загорелся чек.</div>
+      <div class="bubble bot">Комментарий принят. Теперь пришлите 5 фото: 4 стороны авто и приборная панель с уровнем топлива.</div>
+    </div><div class="input"><div class="field">Сообщение</div><div class="send">›</div></div></div>
+  </section>
+
+  <section class="phone" id="screen-6">
+    <div class="top"><div class="avatar">АС</div><div><div class="title">АС - авто сотрудникам</div><div class="subtitle">бот в группе</div></div></div>
+    <div class="chat"><div class="caption">6. Возврат, списание и месячный отчет</div><div class="content">
+      <div class="date">Конец месяца</div>
+      <div class="bubble user">
+        <div class="photos">
+          <div class="photo"></div><div class="photo"></div><div class="photo"></div><div class="photo"></div>
+        </div>
+      </div>
+      <div class="bubble bot">Возврат зафиксирован: JAC J7 Н537РА126.
+Фото отправлены в рабочий чат.
+После списания аренды ответственный отправляет /paid ответом на это сообщение.</div>
+      <div class="bubble user">/start</div>
+      <div class="bubble bot">Для @Fedos_AV и @D_u_a доступны отчеты:
+        <div class="keyboard">
+          <div class="btn">Месячный отчет</div>
+          <div class="btn">Список сотрудников</div>
+          <div class="btn">Отчет по сотруднику</div>
+        </div>
+      </div>
+      <div class="bubble bot">Отчет за 2026-05: 1 запись.
+        <div class="report">
+          <table>
+            <tr><th>ФИО</th><th>авто</th><th>даты</th><th>дней</th><th>комментарий</th></tr>
+            <tr><td>Иван Иванов</td><td>JAC J7<br>Н537РА126</td><td>24.05-25.05</td><td>2</td><td>Трясет после 80 км/ч</td></tr>
+          </table>
+        </div>
+      </div>
+    </div><div class="input"><div class="field">Сообщение</div><div class="send">›</div></div></div>
+  </section>
+</main>
+</body>
+</html>

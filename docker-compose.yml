@@ -1,0 +1,10 @@
+services:
+  autostaxbot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    environment:
+      DB_PATH: /app/data/car_rental_bot.sqlite3
