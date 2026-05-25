@@ -3,6 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import sqlite3
+from zoneinfo import ZoneInfo
+
+
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+
+
+def now_moscow_iso() -> str:
+    return datetime.now(MOSCOW_TZ).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
 @dataclass(frozen=True)
@@ -30,6 +38,7 @@ class Rental:
     paid: bool
     created_at: str
     returned_at: str | None
+    approval_status: str | None
 
 
 class Storage:
@@ -124,7 +133,7 @@ class Storage:
         total: int | None = None,
     ) -> int:
         with self.connect() as conn:
-            created_at = datetime.now().isoformat(timespec="seconds")
+            created_at = now_moscow_iso()
             rental_month = created_at[:7]
             row = conn.execute(
                 "SELECT COALESCE(MAX(rental_no), 0) + 1 AS next_no FROM rentals WHERE rental_month = ?",
@@ -175,7 +184,7 @@ class Storage:
         comment: str,
     ) -> int:
         with self.connect() as conn:
-            created_at = datetime.now().isoformat(timespec="seconds")
+            created_at = now_moscow_iso()
             rental_month = created_at[:7]
             row = conn.execute(
                 "SELECT COALESCE(MAX(rental_no), 0) + 1 AS next_no FROM rentals WHERE rental_month = ?",
@@ -274,11 +283,49 @@ class Storage:
                     photo_count,
                     return_comment,
                     condition_status,
-                    datetime.now().isoformat(timespec="seconds"),
+                    now_moscow_iso(),
                     row["id"],
                 ),
             )
+            conn.commit()
             return self.get_by_id(row["id"])
+
+    def set_total(self, rental_id: int, total: int) -> Rental | None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE rentals SET total = ?, approval_status = ? WHERE id = ?",
+                (total, "manual", rental_id),
+            )
+            conn.commit()
+            return self.get_by_id(rental_id)
+
+    def set_test_drive_status(self, rental_id: int, is_test_drive: bool, rate: int | None, total: int) -> Rental | None:
+        with self.connect() as conn:
+            if is_test_drive:
+                conn.execute(
+                    """
+                    UPDATE rentals
+                    SET days = 0, rate = 0, total = 0, condition_status = 'test_drive',
+                        approval_status = 'test_drive', status = 'returned', paid = 1,
+                        returned_at = COALESCE(returned_at, created_at)
+                    WHERE id = ?
+                    """,
+                    (rental_id,),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE rentals
+                    SET days = CASE WHEN days <= 0 THEN 1 ELSE days END,
+                        rate = ?, total = ?, condition_status = NULL,
+                        approval_status = 'manual_rent', status = 'taken', paid = 0,
+                        returned_at = NULL
+                    WHERE id = ?
+                    """,
+                    (rate, total, rental_id),
+                )
+            conn.commit()
+            return self.get_by_id(rental_id)
 
     def active_for_user(self, chat_id: int, user_id: int) -> list[Rental]:
         with self.connect() as conn:
@@ -421,4 +468,5 @@ def _rental(row: sqlite3.Row) -> Rental:
         paid=bool(row["paid"]),
         created_at=row["created_at"],
         returned_at=row["returned_at"],
+        approval_status=row["approval_status"],
     )

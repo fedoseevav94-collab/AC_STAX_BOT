@@ -5,6 +5,7 @@ from datetime import datetime
 from io import BytesIO
 from collections import defaultdict
 from dataclasses import dataclass, field
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -18,7 +19,16 @@ from openpyxl.utils import get_column_letter
 
 from bot.config import load_config
 from bot.dates import parse_return_plan
-from bot.keyboards import condition_menu, model_by_index, model_category, model_legend, model_menu, skip_take_comment_menu, start_menu
+from bot.keyboards import (
+    admin_rental_controls,
+    condition_menu,
+    model_by_index,
+    model_category,
+    model_legend,
+    model_menu,
+    skip_take_comment_menu,
+    start_menu,
+)
 from bot.parser import parse_approval, parse_return, parse_take
 from bot.rules import check_take_rules, validate_approval
 from bot.storage import Storage
@@ -34,6 +44,9 @@ HELP_TEXT = """Форматы:
 
 К выдаче и возврату нужно приложить 5 фото: 4 стороны авто и приборная панель с топливом.
 """
+
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+ADMIN_CONTROL_USERNAMES = {"fedos_av"}
 
 
 class TakeFlow(StatesGroup):
@@ -61,6 +74,10 @@ class TestDriveFlow(StatesGroup):
     photos = State()
 
 
+class AdminAmountFlow(StatesGroup):
+    amount = State()
+
+
 @dataclass
 class MediaGroupBuffer:
     messages: list[Message] = field(default_factory=list)
@@ -75,6 +92,35 @@ media_groups: dict[str, MediaGroupBuffer] = defaultdict(MediaGroupBuffer)
 
 def username(message: Message) -> str | None:
     return message.from_user.username.lower() if message.from_user and message.from_user.username else None
+
+
+def callback_username(callback: CallbackQuery) -> str | None:
+    return callback.from_user.username.lower() if callback.from_user and callback.from_user.username else None
+
+
+def now_moscow() -> datetime:
+    return datetime.now(MOSCOW_TZ).replace(tzinfo=None)
+
+
+def remember_user(user) -> None:
+    if user and user.username:
+        storage.set_setting(f"user_id:{user.username.lower()}", str(user.id))
+
+
+def is_admin_control_user(callback: CallbackQuery) -> bool:
+    return (callback_username(callback) or "") in ADMIN_CONTROL_USERNAMES
+
+
+def is_test_drive_rental(rental) -> bool:
+    return int(rental.days or 0) == 0 or rental.condition_status == "test_drive" or rental.approval_status == "test_drive"
+
+
+def is_test_drive_row(row) -> bool:
+    return (
+        int(row["days"] or 0) == 0
+        or row["condition_status"] == "test_drive"
+        or row["approval_status"] == "test_drive"
+    )
 
 
 def employee_name(message: Message) -> str:
@@ -140,6 +186,26 @@ async def send_to_work_chat(bot: Bot, file_ids: list[str], summary: str) -> None
     await bot.send_media_group(chat_id=work_chat_id, media=media)
 
 
+async def send_admin_controls(bot: Bot, rental) -> None:
+    is_test_drive = is_test_drive_rental(rental)
+    for admin_username in ADMIN_CONTROL_USERNAMES:
+        admin_user_id = storage.get_setting(f"user_id:{admin_username}")
+        if not admin_user_id:
+            continue
+        try:
+            await bot.send_message(
+                chat_id=int(admin_user_id),
+                text=(
+                    f"Управление заявкой #{rental.rental_no or rental.id}\n"
+                    f"{rental.employee_name or 'Без ФИО'}: {rental.model} {rental.plate}\n"
+                    f"Текущая сумма: {rental.total or 0} руб."
+                ),
+                reply_markup=admin_rental_controls(rental.id, is_test_drive=is_test_drive),
+            )
+        except Exception:
+            pass
+
+
 def effective_work_chat_id() -> int | None:
     if config.work_chat_id is not None:
         return config.work_chat_id
@@ -155,7 +221,7 @@ def rental_price(model: str, days: int, planned_return_at: str | None, started_a
 
     if planned_return_at:
         try:
-            start = datetime.fromisoformat(started_at) if started_at else datetime.now()
+            start = datetime.fromisoformat(started_at) if started_at else now_moscow()
             planned = datetime.fromisoformat(planned_return_at)
             hours = (planned - start).total_seconds() / 3600
             if 10 <= hours <= 14:
@@ -191,6 +257,13 @@ def report_comment(take_comment: str | None, return_comment: str | None) -> str:
     if return_comment and return_comment.strip():
         parts.append(f"Сдача: {return_comment.strip()}")
     return "\n".join(parts)
+
+
+def report_comment_for_row(row) -> str:
+    comment = report_comment(row["take_comment"], row["return_comment"])
+    if is_test_drive_row(row):
+        return f"Тест-драйв\n{comment}".strip()
+    return comment
 
 
 def report_days(days: int) -> str | int:
@@ -232,6 +305,8 @@ async def process_messages(messages: list[Message]) -> None:
     text_message = next((message for message in messages if message.caption or message.text), messages[0])
     text = text_message.caption or text_message.text or ""
     photos = photo_count(messages)
+    if text_message.from_user:
+        remember_user(text_message.from_user)
 
     take = parse_take(text)
     if take:
@@ -286,6 +361,8 @@ async def process_messages(messages: list[Message]) -> None:
                 total,
             ),
         )
+        if rental:
+            await send_admin_controls(text_message.bot, rental)
         summary = await text_message.reply("\n".join(notes))
         storage.update_take_message_id(rental_id, summary.message_id)
         return
@@ -352,16 +429,22 @@ async def flush_media_group(media_group_id: str) -> None:
 
 @dp.message(Command("help"))
 async def help_command(message: Message) -> None:
+    if message.from_user:
+        remember_user(message.from_user)
     await message.answer(HELP_TEXT)
 
 
 @dp.message(Command("start"))
 async def start_command(message: Message) -> None:
+    if message.from_user:
+        remember_user(message.from_user)
     await message.answer("Выберите действие:", reply_markup=start_menu(is_report_user(message)))
 
 
 @dp.message(Command("car"))
 async def car_command(message: Message) -> None:
+    if message.from_user:
+        remember_user(message.from_user)
     await message.answer("Выберите действие:", reply_markup=start_menu(is_report_user(message)))
 
 
@@ -391,7 +474,7 @@ async def report_month_command(message: Message) -> None:
         return
 
     parts = (message.text or "").split()
-    year_month = parts[1] if len(parts) > 1 else datetime.now().strftime("%Y-%m")
+    year_month = parts[1] if len(parts) > 1 else now_moscow().strftime("%Y-%m")
     rows = storage.monthly_report_rows(year_month)
     data = build_report_xlsx(rows, year_month)
     await message.answer_document(
@@ -407,7 +490,7 @@ async def report_employee_command(message: Message) -> None:
         return
 
     parts = (message.text or "").split(maxsplit=2)
-    year_month = datetime.now().strftime("%Y-%m")
+    year_month = now_moscow().strftime("%Y-%m")
     query = ""
     if len(parts) >= 2:
         if len(parts[1]) == 7 and parts[1][4] == "-":
@@ -435,7 +518,7 @@ async def employees_command(message: Message) -> None:
         return
 
     parts = (message.text or "").split()
-    year_month = parts[1] if len(parts) > 1 else datetime.now().strftime("%Y-%m")
+    year_month = parts[1] if len(parts) > 1 else now_moscow().strftime("%Y-%m")
     rows = storage.employees_for_month(year_month)
     if not rows:
         await message.reply(f"За {year_month} сотрудников с арендой не нашел.")
@@ -456,7 +539,7 @@ async def report_month_button(callback: CallbackQuery) -> None:
     if not is_report_callback(callback):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
-    year_month = datetime.now().strftime("%Y-%m")
+    year_month = now_moscow().strftime("%Y-%m")
     rows = storage.monthly_report_rows(year_month)
     data = build_report_xlsx(rows, year_month)
     await callback.message.answer_document(
@@ -471,7 +554,7 @@ async def employees_button(callback: CallbackQuery) -> None:
     if not is_report_callback(callback):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
-    year_month = datetime.now().strftime("%Y-%m")
+    year_month = now_moscow().strftime("%Y-%m")
     rows = storage.employees_for_month(year_month)
     if not rows:
         await callback.message.answer(f"За {year_month} сотрудников с арендой не нашел.")
@@ -519,6 +602,7 @@ def build_report_xlsx(rows, year_month: str) -> bytes:
     sheet.append([f"Отчет по арендам за {year_month}"])
     sheet.append(headers)
     for row in rows:
+        is_test_drive = is_test_drive_row(row)
         _, calculated_total = rental_price(
             row["model"],
             row["days"],
@@ -533,8 +617,8 @@ def build_report_xlsx(rows, year_month: str) -> bytes:
                 format_dt(row["created_at"]),
                 format_dt(row["returned_at"]),
                 report_days(row["days"]),
-                row["total"] or calculated_total,
-                report_comment(row["take_comment"], row["return_comment"]),
+                0 if is_test_drive else (row["total"] if row["total"] is not None else calculated_total),
+                report_comment_for_row(row),
             ]
         )
 
@@ -570,6 +654,90 @@ async def paid_command(message: Message) -> None:
         return
     ok = storage.mark_paid_by_return_message(message.chat.id, message.reply_to_message.message_id)
     await message.reply("Списание отмечено." if ok else "Не нашел возврат по сообщению, на которое вы ответили.")
+
+
+@dp.callback_query(F.data.startswith("rent:set_amount:"))
+async def admin_set_amount_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin_control_user(callback):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    rental_id = int(callback.data.rsplit(":", 1)[1])
+    rental = storage.get_by_id(rental_id)
+    if rental is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    await state.update_data(admin_rental_id=rental_id)
+    await state.set_state(AdminAmountFlow.amount)
+    await callback.message.answer(
+        f"Введите новую сумму аренды для заявки #{rental.rental_no or rental.id} одним числом, например: 1700"
+    )
+    await callback.answer()
+
+
+@dp.message(AdminAmountFlow.amount)
+async def admin_set_amount_finish(message: Message, state: FSMContext) -> None:
+    if (username(message) or "") not in ADMIN_CONTROL_USERNAMES:
+        await message.answer("Недостаточно прав.")
+        await state.clear()
+        return
+    raw_amount = (message.text or "").strip().replace(" ", "")
+    if not raw_amount.isdigit():
+        await message.answer("Введите сумму одним числом, например: 1700")
+        return
+    data = await state.get_data()
+    rental_id = int(data["admin_rental_id"])
+    rental = storage.set_total(rental_id, int(raw_amount))
+    await state.clear()
+    if rental is None:
+        await message.answer("Заявка не найдена.")
+        return
+    await message.answer(
+        f"Сумма по заявке #{rental.rental_no or rental.id} изменена на {rental.total or 0} руб.",
+        reply_markup=admin_rental_controls(rental.id, is_test_drive=is_test_drive_rental(rental)),
+    )
+
+
+@dp.callback_query(F.data.startswith("rent:to_test:"))
+async def admin_switch_to_test_drive(callback: CallbackQuery) -> None:
+    if not is_admin_control_user(callback):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    rental_id = int(callback.data.rsplit(":", 1)[1])
+    rental = storage.set_test_drive_status(rental_id, is_test_drive=True, rate=0, total=0)
+    if rental is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"Заявка #{rental.rental_no or rental.id} переведена в тест-драйв.\n"
+        f"{rental.employee_name or 'Без ФИО'}: {rental.model} {rental.plate}\n"
+        "Сумма: 0 руб.",
+        reply_markup=admin_rental_controls(rental.id, is_test_drive=True),
+    )
+    await callback.answer("Готово")
+
+
+@dp.callback_query(F.data.startswith("rent:to_rent:"))
+async def admin_switch_to_rent(callback: CallbackQuery) -> None:
+    if not is_admin_control_user(callback):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    rental_id = int(callback.data.rsplit(":", 1)[1])
+    rental = storage.get_by_id(rental_id)
+    if rental is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    rate, total = rental_price(rental.model, max(1, rental.days), rental.planned_return_at, rental.created_at)
+    rental = storage.set_test_drive_status(rental_id, is_test_drive=False, rate=rate, total=total)
+    if rental is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"Заявка #{rental.rental_no or rental.id} переведена в аренду.\n"
+        f"{rental.employee_name or 'Без ФИО'}: {rental.model} {rental.plate}\n"
+        f"Сумма: {rental.total or 0} руб.",
+        reply_markup=admin_rental_controls(rental.id, is_test_drive=False),
+    )
+    await callback.answer("Готово")
 
 
 @dp.callback_query(F.data == "car:take")
@@ -639,7 +807,7 @@ async def take_plate(message: Message, state: FSMContext) -> None:
 
 @dp.message(TakeFlow.return_text)
 async def take_return_text(message: Message, state: FSMContext) -> None:
-    plan = parse_return_plan(message.text or "")
+    plan = parse_return_plan(message.text or "", now=now_moscow())
     if plan is None:
         await message.answer("Не понял дату возврата. Напишите, например: завтра 18:30, 29 августа 20:00 или 29.08.2026 12:00.")
         return
@@ -755,6 +923,8 @@ async def take_photos(message: Message, state: FSMContext) -> None:
             total,
         ),
     )
+    if rental:
+        await send_admin_controls(message.bot, rental)
     summary = await message.answer("\n".join(notes))
     storage.update_take_message_id(rental_id, summary.message_id)
     await state.clear()
@@ -891,6 +1061,8 @@ async def test_drive_photos(message: Message, state: FSMContext) -> None:
             0,
         ),
     )
+    if rental:
+        await send_admin_controls(message.bot, rental)
     await message.answer("\n".join(notes))
     await state.clear()
 

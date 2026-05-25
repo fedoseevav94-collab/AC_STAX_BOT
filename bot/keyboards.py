@@ -89,3 +89,17 @@ def skip_take_comment_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Пропустить комментарий", callback_data="take:skip_comment")],
         ]
     )
+
+
+def admin_rental_controls(rental_id: int, is_test_drive: bool = False) -> InlineKeyboardMarkup:
+    status_button = (
+        InlineKeyboardButton(text="Сменить на аренду", callback_data=f"rent:to_rent:{rental_id}")
+        if is_test_drive
+        else InlineKeyboardButton(text="Сменить на тест драйв", callback_data=f"rent:to_test:{rental_id}")
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Изменить стоимость аренды", callback_data=f"rent:set_amount:{rental_id}")],
+            [status_button],
+        ]
+    )
