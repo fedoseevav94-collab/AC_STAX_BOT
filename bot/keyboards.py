@@ -25,6 +25,14 @@ def model_by_index(index: int) -> str | None:
     return None
 
 
+def model_category(model: str) -> str | None:
+    normalized = " ".join((model or "").upper().split())
+    for category, _, car_model in CAR_MODELS:
+        if normalized == car_model.upper():
+            return category
+    return None
+
+
 def model_legend() -> str:
     return "🟢 КОМФОРТ +\n🔵 КОМФОРТ\n🟡 ЭКОНОМ"
 

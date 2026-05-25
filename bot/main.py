@@ -18,7 +18,7 @@ from openpyxl.utils import get_column_letter
 
 from bot.config import load_config
 from bot.dates import parse_return_plan
-from bot.keyboards import condition_menu, model_by_index, model_legend, model_menu, skip_take_comment_menu, start_menu
+from bot.keyboards import condition_menu, model_by_index, model_category, model_legend, model_menu, skip_take_comment_menu, start_menu
 from bot.parser import parse_approval, parse_return, parse_take
 from bot.rules import check_take_rules, validate_approval
 from bot.storage import Storage
@@ -140,6 +140,83 @@ def effective_work_chat_id() -> int | None:
     return int(value) if value else None
 
 
+def rental_price(model: str, days: int, planned_return_at: str | None, started_at: str | None = None) -> tuple[int, int]:
+    category = model_category(model)
+    day_rate = 1200 if category == "ЭКОНОМ" else 1700
+    half_day_rate = 600 if category == "ЭКОНОМ" else 900
+    normalized_days = max(1, int(days or 1))
+
+    if planned_return_at:
+        try:
+            start = datetime.fromisoformat(started_at) if started_at else datetime.now()
+            planned = datetime.fromisoformat(planned_return_at)
+            hours = (planned - start).total_seconds() / 3600
+            if 10 <= hours <= 14:
+                return half_day_rate, half_day_rate
+        except ValueError:
+            pass
+
+    return day_rate, day_rate * normalized_days
+
+
+def format_dt(value: str | None) -> str:
+    if not value:
+        return "не указана"
+    try:
+        return datetime.fromisoformat(value).strftime("%d.%m.%Y %H:%M")
+    except ValueError:
+        return value
+
+
+def user_label(full_name: str, user_name: str | None, user_id: int) -> str:
+    nick = f"@{user_name}" if user_name else f"id {user_id}"
+    return f"{full_name} ({nick})"
+
+
+def comment_text(comment: str | None) -> str:
+    return comment.strip() if comment and comment.strip() else "не указано"
+
+
+def report_comment(take_comment: str | None, return_comment: str | None) -> str:
+    parts = []
+    if take_comment and take_comment.strip():
+        parts.append(f"Взятие: {take_comment.strip()}")
+    if return_comment and return_comment.strip():
+        parts.append(f"Сдача: {return_comment.strip()}")
+    return "\n".join(parts)
+
+
+def format_application(
+    title: str,
+    full_name: str,
+    user_name: str | None,
+    user_id: int,
+    model: str,
+    plate: str,
+    created_at: str | None,
+    planned_return_at: str | None,
+    return_text: str | None,
+    days: int,
+    comment: str | None,
+    total: int | None,
+) -> str:
+    planned = format_dt(planned_return_at) if planned_return_at else (return_text or "не указана")
+    amount = f"{total} руб." if total is not None else "не рассчитана"
+    return "\n".join(
+        [
+            title,
+            f"ФИО: {user_label(full_name, user_name, user_id)}",
+            f"Гос номер авто: {plate}",
+            f"Марка модель: {model}",
+            f"Дата взятия: {format_dt(created_at)}",
+            f"Планируемая дата возврата: {planned}",
+            f"Кол-во дней: {days}",
+            f"Комментарий: {comment_text(comment)}",
+            f"Сумма аренды: {amount}",
+        ]
+    )
+
+
 async def process_messages(messages: list[Message]) -> None:
     text_message = next((message for message in messages if message.caption or message.text), messages[0])
     text = text_message.caption or text_message.text or ""
@@ -154,6 +231,7 @@ async def process_messages(messages: list[Message]) -> None:
             )
             return
         check = check_take_rules(config, take, username(text_message))
+        rate, total = rental_price(take.model, take.days, None)
         rental_id = storage.create_take(
             chat_id=text_message.chat.id,
             message_id=text_message.message_id,
@@ -168,10 +246,12 @@ async def process_messages(messages: list[Message]) -> None:
             night_shift=take.is_night_shift,
             photo_count=photos,
             take_comment=None,
+            rate=rate,
+            total=total,
         )
         rental = storage.get_by_id(rental_id)
         public_no = rental.rental_no if rental and rental.rental_no else rental_id
-        notes = [f"Зафиксировал выдачу #{public_no}: {take.model} {take.plate}, {take.days} дн."]
+        notes = [f"Зафиксировал выдачу #{public_no}: {take.model} {take.plate}, {take.days} дн., сумма {total} руб."]
         if not check.allowed:
             notes.append("По правилам выдача не проходит: " + " ".join(check.warnings))
         elif check.warnings:
@@ -180,10 +260,19 @@ async def process_messages(messages: list[Message]) -> None:
         await send_to_work_chat(
             text_message.bot,
             photo_file_ids(messages),
-            (
-                f"Выдача #{public_no}: {employee_name(text_message)} "
-                f"(@{username(text_message) or text_message.from_user.id}), "
-                f"{take.model} {take.plate}, {take.days} дн., возврат {take.return_text}"
+            format_application(
+                f"Выдача #{public_no}",
+                employee_name(text_message),
+                username(text_message),
+                text_message.from_user.id,
+                take.model,
+                take.plate,
+                rental.created_at if rental else None,
+                rental.planned_return_at if rental else None,
+                take.return_text,
+                take.days,
+                None,
+                total,
             ),
         )
         summary = await text_message.reply("\n".join(notes))
@@ -217,15 +306,24 @@ async def process_messages(messages: list[Message]) -> None:
             return
         model = returned.model or rental.model
         days = returned.days or rental.days
-        notes = [f"Зафиксировал возврат: {model} {returned.plate}, аренда {days} дн."]
+        notes = [f"Зафиксировал возврат: {model} {returned.plate}, аренда {days} дн., сумма {rental.total or 0} руб."]
         notes.append("Фото отправлены в рабочий чат." if effective_work_chat_id() else "Рабочий чат не задан, фото никуда не отправлены.")
         await send_to_work_chat(
             text_message.bot,
             photo_file_ids(messages),
-            (
-                f"Возврат: {employee_name(text_message)} "
-                f"(@{username(text_message) or text_message.from_user.id}), "
-                f"{model} {returned.plate}, комментарий: {returned.comment}"
+            format_application(
+                f"Сдача #{rental.rental_no or rental.id}",
+                rental.employee_name or employee_name(text_message),
+                rental.username or username(text_message),
+                rental.user_id,
+                model,
+                returned.plate,
+                rental.created_at,
+                rental.planned_return_at,
+                rental.return_text,
+                days,
+                returned.comment,
+                rental.total,
             ),
         )
         if rental.total and rental.total > 0:
@@ -398,48 +496,34 @@ def build_report_xlsx(rows, year_month: str) -> bytes:
     sheet = workbook.active
     sheet.title = "Аренды"
     headers = [
-        "№",
-        "ФИО сотрудника",
-        "username",
-        "Telegram ID",
-        "Марка авто",
+        "ФИО",
+        "Марка модель машины",
         "Гос номер",
         "Дата взятия",
-        "Плановый возврат",
         "Дата сдачи",
         "Кол-во дней",
-        "Комментарий при взятии",
-        "Комментарий при сдаче",
-        "Состояние при сдаче",
-        "Ставка",
-        "Итого",
-        "Оплачено/списано",
-        "Фото при взятии",
-        "Фото при сдаче",
+        "Сумма аренды",
+        "Комментарий",
     ]
     sheet.append([f"Отчет по арендам за {year_month}"])
     sheet.append(headers)
     for row in rows:
+        _, calculated_total = rental_price(
+            row["model"],
+            row["days"],
+            row["planned_return_at"],
+            row["created_at"],
+        )
         sheet.append(
             [
-                row["rental_no"] or "",
                 row["employee_name"] or "",
-                row["username"] or "",
-                row["user_id"],
                 row["model"],
                 row["plate"],
-                row["created_at"],
-                row["planned_return_at"] or row["return_text"] or "",
-                row["returned_at"] or "",
+                format_dt(row["created_at"]),
+                format_dt(row["returned_at"]),
                 row["days"],
-                row["take_comment"] or "",
-                row["return_comment"] or "",
-                row["condition_status"] or "",
-                row["rate"] or "",
-                row["total"] or "",
-                "да" if row["paid"] else "нет",
-                row["photo_count_take"],
-                row["photo_count_return"],
+                row["total"] or calculated_total,
+                report_comment(row["take_comment"], row["return_comment"]),
             ]
         )
 
@@ -457,7 +541,7 @@ def build_report_xlsx(rows, year_month: str) -> bytes:
             cell.alignment = Alignment(vertical="top", wrap_text=True)
     sheet.freeze_panes = "A3"
     sheet.auto_filter.ref = f"A2:{get_column_letter(len(headers))}{sheet.max_row}"
-    widths = [8, 24, 18, 14, 20, 14, 20, 22, 20, 12, 30, 34, 20, 12, 12, 16, 14, 14]
+    widths = [28, 24, 16, 20, 20, 12, 16, 42]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     buffer = BytesIO()
@@ -614,6 +698,7 @@ async def take_photos(message: Message, state: FSMContext) -> None:
         return
 
     check = check_take_rules(config, take, username(message))
+    rate, total = rental_price(take.model, take.days, data.get("planned_return_at"))
     rental_id = storage.create_take(
         chat_id=message.chat.id,
         message_id=first_photo_message_id,
@@ -628,20 +713,31 @@ async def take_photos(message: Message, state: FSMContext) -> None:
         night_shift=take.is_night_shift,
         photo_count=count,
         take_comment=data.get("take_comment"),
+        rate=rate,
+        total=total,
     )
     rental = storage.get_by_id(rental_id)
     public_no = rental.rental_no if rental and rental.rental_no else rental_id
-    notes = [f"Заявка на выдачу #{public_no} зафиксирована: {take.model} {take.plate}, {take.days} дн."]
+    notes = [f"Заявка на выдачу #{public_no} зафиксирована: {take.model} {take.plate}, {take.days} дн., сумма {total} руб."]
     if check.warnings:
         notes.extend(check.warnings)
     notes.append("Фото отправлены в рабочий чат." if effective_work_chat_id() else "Рабочий чат не задан, фото никуда не отправлены.")
     await send_to_work_chat(
         message.bot,
         list(data.get("photo_file_ids", [])),
-        (
-            f"Выдача #{public_no}: @{username(message) or message.from_user.id}, "
-            f"{employee_name(message)}, {take.model} {take.plate}, {take.days} дн., возврат {take.return_text}. "
-            f"Комментарий/согласование: {data.get('take_comment') or 'не указано'}"
+        format_application(
+            f"Выдача #{public_no}",
+            employee_name(message),
+            username(message),
+            message.from_user.id,
+            take.model,
+            take.plate,
+            rental.created_at if rental else None,
+            rental.planned_return_at if rental else data.get("planned_return_at"),
+            take.return_text,
+            take.days,
+            data.get("take_comment"),
+            total,
         ),
     )
     summary = await message.answer("\n".join(notes))
@@ -735,14 +831,24 @@ async def return_photos(message: Message, state: FSMContext) -> None:
         await message.answer("Не нашел активную выдачу по этому номеру. Проверьте номер или обратитесь к ответственному.")
         await state.clear()
         return
-    notes = [f"Возврат зафиксирован: {rental.model} {rental.plate}."]
+    notes = [f"Возврат зафиксирован: {rental.model} {rental.plate}, сумма {rental.total or 0} руб."]
     notes.append("Фото отправлены в рабочий чат." if effective_work_chat_id() else "Рабочий чат не задан, фото никуда не отправлены.")
     await send_to_work_chat(
         message.bot,
         list(data.get("photo_file_ids", [])),
-        (
-            f"Возврат: @{username(message) or message.from_user.id}, {rental.model} {rental.plate}. "
-            f"Состояние: {data.get('return_comment')}"
+        format_application(
+            f"Сдача #{rental.rental_no or rental.id}",
+            rental.employee_name or employee_name(message),
+            rental.username or username(message),
+            rental.user_id,
+            rental.model,
+            rental.plate,
+            rental.created_at,
+            rental.planned_return_at,
+            rental.return_text,
+            rental.days,
+            data.get("return_comment"),
+            rental.total,
         ),
     )
     if rental.total and rental.total > 0:

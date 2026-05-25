@@ -19,13 +19,17 @@ class Rental:
     model: str
     plate: str
     days: int
+    return_text: str | None
     planned_return_at: str | None
     take_comment: str | None
     return_comment: str | None
     condition_status: str | None
     status: str
+    rate: int | None
     total: int | None
     paid: bool
+    created_at: str
+    returned_at: str | None
 
 
 class Storage:
@@ -116,6 +120,8 @@ class Storage:
         night_shift: bool,
         photo_count: int,
         take_comment: str | None = None,
+        rate: int | None = None,
+        total: int | None = None,
     ) -> int:
         with self.connect() as conn:
             created_at = datetime.now().isoformat(timespec="seconds")
@@ -129,9 +135,9 @@ class Storage:
                 """
                 INSERT INTO rentals (
                     rental_no, rental_month, chat_id, take_message_id, user_id, username, employee_name, model, plate, days, return_text,
-                    planned_return_at, night_shift, photo_count_take, take_comment, status, created_at
+                    planned_return_at, night_shift, photo_count_take, take_comment, rate, total, status, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'taken', ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'taken', ?)
                 """,
                 (
                     rental_no,
@@ -149,6 +155,8 @@ class Storage:
                     int(night_shift),
                     photo_count,
                     take_comment,
+                    rate,
+                    total,
                     created_at,
                 ),
             )
@@ -351,10 +359,14 @@ def _rental(row: sqlite3.Row) -> Rental:
         plate=row["plate"],
         days=row["days"],
         planned_return_at=row["planned_return_at"],
+        return_text=row["return_text"],
         take_comment=row["take_comment"],
         return_comment=row["return_comment"],
         condition_status=row["condition_status"],
         status=row["status"],
+        rate=row["rate"],
         total=row["total"],
         paid=bool(row["paid"]),
+        created_at=row["created_at"],
+        returned_at=row["returned_at"],
     )
