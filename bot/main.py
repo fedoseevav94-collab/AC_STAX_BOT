@@ -54,6 +54,13 @@ class ReturnFlow(StatesGroup):
     photos = State()
 
 
+class TestDriveFlow(StatesGroup):
+    model = State()
+    plate = State()
+    comment = State()
+    photos = State()
+
+
 @dataclass
 class MediaGroupBuffer:
     messages: list[Message] = field(default_factory=list)
@@ -186,6 +193,10 @@ def report_comment(take_comment: str | None, return_comment: str | None) -> str:
     return "\n".join(parts)
 
 
+def report_days(days: int) -> str | int:
+    return "тест драйв" if int(days or 0) == 0 else days
+
+
 def format_application(
     title: str,
     full_name: str,
@@ -210,7 +221,7 @@ def format_application(
             f"Марка модель: {model}",
             f"Дата взятия: {format_dt(created_at)}",
             f"Планируемая дата возврата: {planned}",
-            f"Кол-во дней: {days}",
+            f"Кол-во дней: {report_days(days)}",
             f"Комментарий: {comment_text(comment)}",
             f"Сумма аренды: {amount}",
         ]
@@ -521,7 +532,7 @@ def build_report_xlsx(rows, year_month: str) -> bytes:
                 row["plate"],
                 format_dt(row["created_at"]),
                 format_dt(row["returned_at"]),
-                row["days"],
+                report_days(row["days"]),
                 row["total"] or calculated_total,
                 report_comment(row["take_comment"], row["return_comment"]),
             ]
@@ -586,6 +597,10 @@ async def save_profile_name(message: Message, state: FSMContext) -> None:
     if data.get("pending_action") == "take":
         await state.set_state(TakeFlow.model)
         await message.answer("Спасибо, ФИО сохранено.\nВыберите марку авто:", reply_markup=model_menu())
+        return
+    if data.get("pending_action") == "test_drive":
+        await state.set_state(TestDriveFlow.model)
+        await message.answer("Спасибо, ФИО сохранено.\nВыберите марку авто для тест драйва:", reply_markup=model_menu("test_model"))
         return
     await state.clear()
     await message.answer("Спасибо, ФИО сохранено. Нажмите /start для продолжения.")
@@ -765,6 +780,124 @@ async def start_return(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(ReturnFlow.plate)
         await callback.message.answer("Введите госномер машины, которую сдаете.")
     await callback.answer()
+
+
+@dp.callback_query(F.data == "car:test_drive")
+async def start_test_drive(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if not has_employee_name(callback.from_user):
+        await state.update_data(pending_action="test_drive")
+        await state.set_state(ProfileFlow.name)
+        await callback.message.answer("Введите ваше ФИО один раз, чтобы бот корректно формировал отчеты.")
+        await callback.answer()
+        return
+    await state.set_state(TestDriveFlow.model)
+    await callback.message.answer(f"Выберите марку авто для тест драйва:\n\n{model_legend()}", reply_markup=model_menu("test_model"))
+    await callback.answer()
+
+
+@dp.callback_query(TestDriveFlow.model, F.data.startswith("test_model:"))
+async def test_drive_model_button(callback: CallbackQuery, state: FSMContext) -> None:
+    raw_index = callback.data.split(":", 1)[1]
+    model = model_by_index(int(raw_index)) if raw_index.isdigit() else None
+    if model is None:
+        await callback.answer("Не нашел модель", show_alert=True)
+        return
+    await state.update_data(model=model)
+    await state.set_state(TestDriveFlow.plate)
+    await callback.message.answer(f"Выбрано: {model}\nВведите госномер, например: Н537РА126")
+    await callback.answer()
+
+
+@dp.message(TestDriveFlow.model)
+async def test_drive_model(message: Message, state: FSMContext) -> None:
+    await message.answer("Выберите марку авто кнопкой из списка выше.")
+
+
+@dp.message(TestDriveFlow.plate)
+async def test_drive_plate(message: Message, state: FSMContext) -> None:
+    await state.update_data(plate=(message.text or "").strip().upper().replace(" ", ""))
+    await state.set_state(TestDriveFlow.comment)
+    await message.answer("Напишите, с кем согласован тест драйв. Это обязательный комментарий.")
+
+
+@dp.message(TestDriveFlow.comment)
+async def test_drive_comment(message: Message, state: FSMContext) -> None:
+    comment = (message.text or "").strip()
+    if not comment:
+        await message.answer("Для тест драйва обязательно нужно указать, с кем он согласован.")
+        return
+    await state.update_data(
+        test_comment=comment,
+        photo_count=0,
+        first_photo_message_id=None,
+        photo_message_ids=[],
+        photo_file_ids=[],
+    )
+    await state.set_state(TestDriveFlow.photos)
+    await message.answer("Комментарий принят. Пришлите 5 фото: 4 стороны авто и приборная панель с уровнем топлива.")
+
+
+@dp.message(TestDriveFlow.photos, F.photo)
+async def test_drive_photos(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    count = int(data.get("photo_count", 0)) + 1
+    first_photo_message_id = data.get("first_photo_message_id") or message.message_id
+    photo_message_ids = list(data.get("photo_message_ids", []))
+    photo_message_ids.append(message.message_id)
+    file_ids = list(data.get("photo_file_ids", []))
+    file_ids.append(message.photo[-1].file_id)
+    await state.update_data(
+        photo_count=count,
+        first_photo_message_id=first_photo_message_id,
+        photo_message_ids=photo_message_ids,
+        photo_file_ids=file_ids,
+    )
+    if count < 5:
+        await message.answer(f"Фото принято: {count}/5.")
+        return
+
+    data = await state.get_data()
+    rental_id = storage.create_test_drive(
+        chat_id=message.chat.id,
+        message_id=first_photo_message_id,
+        user_id=message.from_user.id,
+        username=username(message),
+        employee_name=employee_name(message),
+        model=data["model"],
+        plate=data["plate"],
+        photo_count=count,
+        comment=data["test_comment"],
+    )
+    rental = storage.get_by_id(rental_id)
+    public_no = rental.rental_no if rental and rental.rental_no else rental_id
+    notes = [f"Тест драйв #{public_no} зафиксирован: {data['model']} {data['plate']}, бесплатно."]
+    notes.append("Фото отправлены в рабочий чат." if effective_work_chat_id() else "Рабочий чат не задан, фото никуда не отправлены.")
+    await send_to_work_chat(
+        message.bot,
+        list(data.get("photo_file_ids", [])),
+        format_application(
+            f"Тест драйв #{public_no}",
+            employee_name(message),
+            username(message),
+            message.from_user.id,
+            data["model"],
+            data["plate"],
+            rental.created_at if rental else None,
+            None,
+            "тест драйв",
+            0,
+            f"Согласовано: {data['test_comment']}",
+            0,
+        ),
+    )
+    await message.answer("\n".join(notes))
+    await state.clear()
+
+
+@dp.message(TestDriveFlow.photos)
+async def test_drive_photos_wrong(message: Message) -> None:
+    await message.answer("На этом шаге нужны 5 фото: 4 стороны авто и приборная панель с топливом.")
 
 
 @dp.message(ReturnFlow.plate)

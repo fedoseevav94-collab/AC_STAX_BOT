@@ -162,6 +162,58 @@ class Storage:
             )
             return int(cursor.lastrowid)
 
+    def create_test_drive(
+        self,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        username: str | None,
+        employee_name: str | None,
+        model: str,
+        plate: str,
+        photo_count: int,
+        comment: str,
+    ) -> int:
+        with self.connect() as conn:
+            created_at = datetime.now().isoformat(timespec="seconds")
+            rental_month = created_at[:7]
+            row = conn.execute(
+                "SELECT COALESCE(MAX(rental_no), 0) + 1 AS next_no FROM rentals WHERE rental_month = ?",
+                (rental_month,),
+            ).fetchone()
+            rental_no = int(row["next_no"])
+            cursor = conn.execute(
+                """
+                INSERT INTO rentals (
+                    rental_no, rental_month, chat_id, take_message_id, return_message_id,
+                    user_id, username, employee_name, model, plate, days, return_text,
+                    planned_return_at, night_shift, photo_count_take, photo_count_return,
+                    take_comment, return_comment, condition_status, rate, total,
+                    status, paid, created_at, returned_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', NULL, 0, ?, ?, ?, ?, 'test_drive', 0, 0, 'returned', 1, ?, ?)
+                """,
+                (
+                    rental_no,
+                    rental_month,
+                    chat_id,
+                    message_id,
+                    message_id,
+                    user_id,
+                    username,
+                    employee_name,
+                    model,
+                    plate,
+                    photo_count,
+                    photo_count,
+                    f"Тест драйв. Согласовано: {comment}",
+                    comment,
+                    created_at,
+                    created_at,
+                ),
+            )
+            return int(cursor.lastrowid)
+
     def set_approval(
         self,
         chat_id: int,

@@ -37,10 +37,10 @@ def model_legend() -> str:
     return "🟢 КОМФОРТ +\n🔵 КОМФОРТ\n🟡 ЭКОНОМ"
 
 
-def model_menu() -> InlineKeyboardMarkup:
+def model_menu(callback_prefix: str = "take_model") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for index, (_, marker, model) in enumerate(CAR_MODELS):
-        rows.append([InlineKeyboardButton(text=f"{marker} {model}", callback_data=f"take_model:{index}")])
+        rows.append([InlineKeyboardButton(text=f"{marker} {model}", callback_data=f"{callback_prefix}:{index}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -50,7 +50,8 @@ def car_menu() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="Взять машину", callback_data="car:take"),
                 InlineKeyboardButton(text="Сдать машину", callback_data="car:return"),
-            ]
+            ],
+            [InlineKeyboardButton(text="Тест драйв авто", callback_data="car:test_drive")],
         ]
     )
 
@@ -60,7 +61,8 @@ def start_menu(can_report: bool = False) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="Взять машину", callback_data="car:take"),
             InlineKeyboardButton(text="Сдать машину", callback_data="car:return"),
-        ]
+        ],
+        [InlineKeyboardButton(text="Тест драйв авто", callback_data="car:test_drive")],
     ]
     if can_report:
         rows.extend(
