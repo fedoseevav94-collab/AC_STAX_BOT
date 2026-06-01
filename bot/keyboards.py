@@ -56,7 +56,7 @@ def car_menu() -> InlineKeyboardMarkup:
     )
 
 
-def start_menu(can_report: bool = False) -> InlineKeyboardMarkup:
+def start_menu(can_report: bool = False, can_admin: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(text="Взять машину", callback_data="car:take"),
@@ -71,8 +71,11 @@ def start_menu(can_report: bool = False) -> InlineKeyboardMarkup:
                 [InlineKeyboardButton(text="Отчет за прошлый месяц", callback_data="report:previous_month")],
                 [InlineKeyboardButton(text="Список сотрудников", callback_data="report:employees")],
                 [InlineKeyboardButton(text="Отчет по сотруднику", callback_data="report:employee_help")],
+                [InlineKeyboardButton(text="Активные выдачи", callback_data="admin:active_rentals")],
             ]
         )
+    if can_admin:
+        rows.append([InlineKeyboardButton(text="Тарифы аренды", callback_data="admin:tariffs")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -97,6 +100,7 @@ def admin_approval_controls(rental_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Одобрить без изменений", callback_data=f"rent:approve:{rental_id}")],
             [InlineKeyboardButton(text="Одобрить и изменить сумму", callback_data=f"rent:approve_amount:{rental_id}")],
+            [InlineKeyboardButton(text="Одобрить как тест-драйв", callback_data=f"rent:approve_test:{rental_id}")],
             [InlineKeyboardButton(text="Не одобрено", callback_data=f"rent:reject:{rental_id}")],
         ]
     )
@@ -107,5 +111,16 @@ def employee_reapproval_controls(rental_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Связался и согласовал", callback_data=f"rent:resubmit:{rental_id}")],
             [InlineKeyboardButton(text="В выдаче отказано", callback_data=f"rent:employee_cancel:{rental_id}")],
+        ]
+    )
+
+
+def tariff_controls() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Комфорт/Комфорт+ сутки", callback_data="tariff:set:comfort_day")],
+            [InlineKeyboardButton(text="Комфорт/Комфорт+ 12 часов", callback_data="tariff:set:comfort_half")],
+            [InlineKeyboardButton(text="Эконом сутки", callback_data="tariff:set:economy_day")],
+            [InlineKeyboardButton(text="Эконом 12 часов", callback_data="tariff:set:economy_half")],
         ]
     )

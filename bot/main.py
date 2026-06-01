@@ -29,6 +29,7 @@ from bot.keyboards import (
     model_menu,
     skip_take_comment_menu,
     start_menu,
+    tariff_controls,
 )
 from bot.parser import parse_approval, parse_return, parse_take
 from bot.rules import check_take_rules, validate_approval
@@ -48,6 +49,21 @@ HELP_TEXT = """Форматы:
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 ADMIN_CONTROL_USERNAMES = {"fedos_av"}
+PENDING_APPROVAL_STATUSES = {"pending", "resubmitted"}
+REMINDER_BEFORE_RETURN = timedelta(hours=2)
+REMINDER_CHECK_INTERVAL_SECONDS = 300
+DEFAULT_TARIFFS = {
+    "comfort_day": 1700,
+    "comfort_half": 900,
+    "economy_day": 1200,
+    "economy_half": 600,
+}
+TARIFF_LABELS = {
+    "comfort_day": "Комфорт/Комфорт+ сутки",
+    "comfort_half": "Комфорт/Комфорт+ 12 часов",
+    "economy_day": "Эконом сутки",
+    "economy_half": "Эконом 12 часов",
+}
 
 
 class TakeFlow(StatesGroup):
@@ -76,6 +92,10 @@ class TestDriveFlow(StatesGroup):
 
 
 class AdminAmountFlow(StatesGroup):
+    amount = State()
+
+
+class AdminTariffFlow(StatesGroup):
     amount = State()
 
 
@@ -155,21 +175,23 @@ def is_approver(message: Message) -> bool:
 
 
 def is_report_user(message: Message) -> bool:
-    current_username = username(message) or ""
-    return (
-        current_username in config.report_usernames
-        or current_username in config.admin_usernames
-        or current_username in config.approver_usernames
-    )
+    return is_admin_message(message)
 
 
 def is_report_callback(callback: CallbackQuery) -> bool:
-    current_username = callback.from_user.username.lower() if callback.from_user and callback.from_user.username else ""
-    return (
-        current_username in config.report_usernames
-        or current_username in config.admin_usernames
-        or current_username in config.approver_usernames
-    )
+    return is_admin_control_user(callback)
+
+
+def is_admin_message(message: Message) -> bool:
+    return (username(message) or "") in ADMIN_CONTROL_USERNAMES
+
+
+def is_admin_user_obj(user) -> bool:
+    return bool(user and user.username and user.username.lower() in ADMIN_CONTROL_USERNAMES)
+
+
+def is_rental_waiting_approval(rental) -> bool:
+    return (rental.approval_status or "pending") in PENDING_APPROVAL_STATUSES
 
 
 def photo_count(messages: list[Message]) -> int:
@@ -274,10 +296,29 @@ def effective_work_chat_id() -> int | None:
     return int(value) if value else None
 
 
+def tariff_value(key: str) -> int:
+    value = storage.get_setting(f"tariff:{key}")
+    if value and value.isdigit():
+        return int(value)
+    return DEFAULT_TARIFFS[key]
+
+
+def tariff_summary_text() -> str:
+    return "\n".join(
+        [
+            "Текущие тарифы:",
+            f"{TARIFF_LABELS['comfort_day']}: {tariff_value('comfort_day')} руб.",
+            f"{TARIFF_LABELS['comfort_half']}: {tariff_value('comfort_half')} руб.",
+            f"{TARIFF_LABELS['economy_day']}: {tariff_value('economy_day')} руб.",
+            f"{TARIFF_LABELS['economy_half']}: {tariff_value('economy_half')} руб.",
+        ]
+    )
+
+
 def rental_price(model: str, days: int, planned_return_at: str | None, started_at: str | None = None) -> tuple[int, int]:
     category = model_category(model)
-    day_rate = 1200 if category == "ЭКОНОМ" else 1700
-    half_day_rate = 600 if category == "ЭКОНОМ" else 900
+    day_rate = tariff_value("economy_day") if category == "ЭКОНОМ" else tariff_value("comfort_day")
+    half_day_rate = tariff_value("economy_half") if category == "ЭКОНОМ" else tariff_value("comfort_half")
     normalized_days = max(1, int(days or 1))
 
     if planned_return_at:
@@ -360,6 +401,39 @@ def format_application(
             f"Сумма аренды: {amount}",
         ]
     )
+
+
+def active_rental_line(rental, now: datetime | None = None) -> str:
+    planned = format_dt(rental.planned_return_at)
+    left_text = ""
+    if rental.planned_return_at:
+        try:
+            planned_dt = datetime.fromisoformat(rental.planned_return_at)
+            current = now or now_moscow()
+            delta = planned_dt - current
+            if delta.total_seconds() < 0:
+                hours = abs(delta.total_seconds()) / 3600
+                left_text = f", просрочка {hours:.1f} ч."
+            else:
+                hours = delta.total_seconds() / 3600
+                left_text = f", осталось {hours:.1f} ч."
+        except ValueError:
+            pass
+    username_text = f"@{rental.username}" if rental.username else f"id {rental.user_id}"
+    return (
+        f"#{rental.rental_no or rental.id}: {rental.employee_name or 'Без ФИО'} ({username_text}) - "
+        f"{rental.model} {rental.plate}, возврат {planned}{left_text}"
+    )
+
+
+def active_rentals_text() -> str:
+    rentals = storage.active_rentals()
+    if not rentals:
+        return "Активных выдач сейчас нет."
+    current = now_moscow()
+    lines = [f"Активные выдачи: {len(rentals)}"]
+    lines.extend(active_rental_line(rental, current) for rental in rentals)
+    return "\n".join(lines)
 
 
 async def process_messages(messages: list[Message]) -> None:
@@ -486,19 +560,35 @@ async def help_command(message: Message) -> None:
 async def start_command(message: Message) -> None:
     if message.from_user:
         remember_user(message.from_user)
-    await message.answer("Выберите действие:", reply_markup=start_menu(is_report_user(message)))
+    await message.answer("Выберите действие:", reply_markup=start_menu(is_report_user(message), is_admin_user_obj(message.from_user)))
 
 
 @dp.message(Command("car"))
 async def car_command(message: Message) -> None:
     if message.from_user:
         remember_user(message.from_user)
-    await message.answer("Выберите действие:", reply_markup=start_menu(is_report_user(message)))
+    await message.answer("Выберите действие:", reply_markup=start_menu(is_report_user(message), is_admin_user_obj(message.from_user)))
 
 
 @dp.message(Command("status"))
 async def status_command(message: Message) -> None:
     await message.answer(f"Активных аренд сейчас: {storage.active_count()}")
+
+
+@dp.message(Command("active_rentals"))
+async def active_rentals_command(message: Message) -> None:
+    if not is_report_user(message):
+        await message.reply("Список активных выдач может запросить только пользователь с доступом к отчетам.")
+        return
+    await message.answer(active_rentals_text())
+
+
+@dp.message(Command("tariffs"))
+async def tariffs_command(message: Message) -> None:
+    if not is_admin_message(message):
+        await message.reply("Тарифы может менять только администратор.")
+        return
+    await message.answer(tariff_summary_text(), reply_markup=tariff_controls())
 
 
 @dp.message(Command("chat_id"))
@@ -648,6 +738,65 @@ async def report_employee_help_button(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@dp.callback_query(F.data == "admin:active_rentals")
+async def active_rentals_button(callback: CallbackQuery) -> None:
+    if not is_report_callback(callback):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await callback.message.answer(active_rentals_text())
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin:tariffs")
+async def tariffs_button(callback: CallbackQuery) -> None:
+    if not is_admin_control_user(callback):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await callback.message.answer(tariff_summary_text(), reply_markup=tariff_controls())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("tariff:set:"))
+async def tariff_set_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin_control_user(callback):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    tariff_key = callback.data.rsplit(":", 1)[1]
+    if tariff_key not in DEFAULT_TARIFFS:
+        await callback.answer("Тариф не найден", show_alert=True)
+        return
+    await state.update_data(tariff_key=tariff_key)
+    await state.set_state(AdminTariffFlow.amount)
+    await callback.message.answer(
+        f"Введите новую сумму для тарифа `{TARIFF_LABELS[tariff_key]}` одним числом, например: 1700"
+    )
+    await callback.answer()
+
+
+@dp.message(AdminTariffFlow.amount)
+async def tariff_set_finish(message: Message, state: FSMContext) -> None:
+    if not is_admin_message(message):
+        await message.answer("Недостаточно прав.")
+        await state.clear()
+        return
+    raw_amount = (message.text or "").strip().replace(" ", "")
+    if not raw_amount.isdigit():
+        await message.answer("Введите сумму одним числом, например: 1700")
+        return
+    data = await state.get_data()
+    tariff_key = data.get("tariff_key")
+    if tariff_key not in DEFAULT_TARIFFS:
+        await message.answer("Тариф не найден. Откройте настройки тарифов заново.")
+        await state.clear()
+        return
+    storage.set_setting(f"tariff:{tariff_key}", raw_amount)
+    await state.clear()
+    await message.answer(
+        f"Тариф `{TARIFF_LABELS[tariff_key]}` изменен на {int(raw_amount)} руб.\n\n{tariff_summary_text()}",
+        reply_markup=tariff_controls(),
+    )
+
+
 def build_report_xlsx(rows, year_month: str) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
@@ -725,6 +874,13 @@ async def admin_approve_rental(callback: CallbackQuery) -> None:
         await callback.answer("Недостаточно прав", show_alert=True)
         return
     rental_id = int(callback.data.rsplit(":", 1)[1])
+    current_rental = storage.get_by_id(rental_id)
+    if current_rental is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    if not is_rental_waiting_approval(current_rental):
+        await callback.answer("Эта заявка уже обработана", show_alert=True)
+        return
     rental = storage.set_approval_status(rental_id, "approved")
     if rental is None:
         await callback.answer("Заявка не найдена", show_alert=True)
@@ -738,6 +894,32 @@ async def admin_approve_rental(callback: CallbackQuery) -> None:
     await callback.answer("Одобрено")
 
 
+@dp.callback_query(F.data.startswith("rent:approve_test:"))
+async def admin_approve_as_test_drive(callback: CallbackQuery) -> None:
+    if not is_admin_control_user(callback):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    rental_id = int(callback.data.rsplit(":", 1)[1])
+    current_rental = storage.get_by_id(rental_id)
+    if current_rental is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    if not is_rental_waiting_approval(current_rental):
+        await callback.answer("Эта заявка уже обработана", show_alert=True)
+        return
+    rental = storage.set_test_drive_status(rental_id, is_test_drive=True, rate=0, total=0)
+    if rental is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    await publish_rental_to_work_chat(callback.message.bot, rental)
+    await callback.message.edit_text(
+        f"Заявка #{rental.rental_no or rental.id} одобрена как тест-драйв и отправлена в рабочий чат.\n"
+        f"{rental.employee_name or 'Без ФИО'}: {rental.model} {rental.plate}\n"
+        "Сумма: 0 руб."
+    )
+    await callback.answer("Одобрено как тест-драйв")
+
+
 @dp.callback_query(F.data.startswith("rent:approve_amount:"))
 async def admin_approve_amount_start(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin_control_user(callback):
@@ -747,6 +929,9 @@ async def admin_approve_amount_start(callback: CallbackQuery, state: FSMContext)
     rental = storage.get_by_id(rental_id)
     if rental is None:
         await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    if not is_rental_waiting_approval(rental):
+        await callback.answer("Эта заявка уже обработана", show_alert=True)
         return
     await state.update_data(admin_rental_id=rental_id)
     await state.set_state(AdminAmountFlow.amount)
@@ -768,6 +953,15 @@ async def admin_set_amount_finish(message: Message, state: FSMContext) -> None:
         return
     data = await state.get_data()
     rental_id = int(data["admin_rental_id"])
+    current_rental = storage.get_by_id(rental_id)
+    if current_rental is None:
+        await message.answer("Заявка не найдена.")
+        await state.clear()
+        return
+    if not is_rental_waiting_approval(current_rental):
+        await message.answer("Эта заявка уже обработана. Повторно отправлять ее в рабочий чат не буду.")
+        await state.clear()
+        return
     rental = storage.set_total(rental_id, int(raw_amount), approval_status="approved_manual")
     await state.clear()
     if rental is None:
@@ -786,6 +980,13 @@ async def admin_reject_rental(callback: CallbackQuery) -> None:
         await callback.answer("Недостаточно прав", show_alert=True)
         return
     rental_id = int(callback.data.rsplit(":", 1)[1])
+    current_rental = storage.get_by_id(rental_id)
+    if current_rental is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    if not is_rental_waiting_approval(current_rental):
+        await callback.answer("Эта заявка уже обработана", show_alert=True)
+        return
     rental = storage.set_approval_status(rental_id, "rejected")
     if rental is None:
         await callback.answer("Заявка не найдена", show_alert=True)
@@ -824,6 +1025,9 @@ async def employee_resubmit_rental(callback: CallbackQuery) -> None:
     if callback.from_user.id != rental.user_id:
         await callback.answer("Это кнопка другого сотрудника", show_alert=True)
         return
+    if rental.approval_status != "rejected":
+        await callback.answer("Эта заявка уже обработана", show_alert=True)
+        return
     rental = storage.set_approval_status(rental_id, "resubmitted")
     if rental is None:
         await callback.answer("Заявка не найдена", show_alert=True)
@@ -850,6 +1054,9 @@ async def employee_cancel_rental(callback: CallbackQuery) -> None:
         return
     if callback.from_user.id != rental.user_id:
         await callback.answer("Это кнопка другого сотрудника", show_alert=True)
+        return
+    if rental.approval_status != "rejected":
+        await callback.answer("Эта заявка уже обработана", show_alert=True)
         return
     storage.set_approval_status(rental_id, "employee_cancelled")
     await callback.message.edit_text(
@@ -1309,6 +1516,71 @@ async def collect_or_process(message: Message) -> None:
     await process_messages([message])
 
 
+async def notify_admins(bot: Bot, text: str) -> None:
+    for admin_username in ADMIN_CONTROL_USERNAMES:
+        admin_user_id = storage.get_setting(f"user_id:{admin_username}")
+        if not admin_user_id:
+            continue
+        try:
+            await bot.send_message(chat_id=int(admin_user_id), text=text)
+        except Exception:
+            pass
+
+
+async def send_return_reminder(bot: Bot, rental) -> None:
+    try:
+        await bot.send_message(
+            chat_id=rental.user_id,
+            text=(
+                f"Напоминание по выдаче #{rental.rental_no or rental.id}: "
+                f"{rental.model} {rental.plate} нужно вернуть до {format_dt(rental.planned_return_at)}.\n"
+                "Не забудьте поменять статус в САВ."
+            ),
+        )
+    except Exception:
+        pass
+
+
+async def send_overdue_notice(bot: Bot, rental) -> None:
+    text = (
+        f"Просрочен возврат по выдаче #{rental.rental_no or rental.id}: "
+        f"{rental.employee_name or 'Без ФИО'} "
+        f"({'@' + rental.username if rental.username else 'id ' + str(rental.user_id)}) - "
+        f"{rental.model} {rental.plate}, плановый возврат {format_dt(rental.planned_return_at)}.\n"
+        "Не забудьте поменять статус в САВ."
+    )
+    try:
+        await bot.send_message(chat_id=rental.user_id, text=text)
+    except Exception:
+        pass
+    await notify_admins(bot, text)
+
+
+async def return_control_loop(bot: Bot) -> None:
+    while True:
+        try:
+            current = now_moscow()
+            for rental in storage.active_rentals():
+                if not rental.planned_return_at:
+                    continue
+                try:
+                    planned = datetime.fromisoformat(rental.planned_return_at)
+                except ValueError:
+                    continue
+                seconds_left = (planned - current).total_seconds()
+                reminder_key = f"return_reminder_sent:{rental.id}"
+                overdue_key = f"return_overdue_sent:{rental.id}"
+                if 0 < seconds_left <= REMINDER_BEFORE_RETURN.total_seconds() and not storage.get_setting(reminder_key):
+                    await send_return_reminder(bot, rental)
+                    storage.set_setting(reminder_key, now_moscow().isoformat(timespec="seconds"))
+                if seconds_left < 0 and not storage.get_setting(overdue_key):
+                    await send_overdue_notice(bot, rental)
+                    storage.set_setting(overdue_key, now_moscow().isoformat(timespec="seconds"))
+        except Exception:
+            pass
+        await asyncio.sleep(REMINDER_CHECK_INTERVAL_SECONDS)
+
+
 async def main() -> None:
     bot = Bot(token=config.bot_token)
     await bot.set_my_commands(
@@ -1317,7 +1589,11 @@ async def main() -> None:
             BotCommand(command="help", description="Показать инструкцию"),
         ]
     )
-    await dp.start_polling(bot)
+    return_control_task = asyncio.create_task(return_control_loop(bot))
+    try:
+        await dp.start_polling(bot)
+    finally:
+        return_control_task.cancel()
 
 
 if __name__ == "__main__":

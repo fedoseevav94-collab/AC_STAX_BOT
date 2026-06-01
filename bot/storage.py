@@ -350,6 +350,18 @@ class Storage:
             ).fetchall()
             return [_rental(row) for row in rows]
 
+    def active_rentals(self) -> list[Rental]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM rentals
+                WHERE status = 'taken'
+                    AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
+                ORDER BY planned_return_at IS NULL, planned_return_at, created_at
+                """
+            ).fetchall()
+            return [_rental(row) for row in rows]
+
     def monthly_report_rows(self, year_month: str, employee_query: str | None = None) -> list[sqlite3.Row]:
         with self.connect() as conn:
             params: list[str] = [year_month]
