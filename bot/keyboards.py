@@ -68,6 +68,7 @@ def start_menu(can_report: bool = False) -> InlineKeyboardMarkup:
         rows.extend(
             [
                 [InlineKeyboardButton(text="Месячный отчет", callback_data="report:month")],
+                [InlineKeyboardButton(text="Отчет за прошлый месяц", callback_data="report:previous_month")],
                 [InlineKeyboardButton(text="Список сотрудников", callback_data="report:employees")],
                 [InlineKeyboardButton(text="Отчет по сотруднику", callback_data="report:employee_help")],
             ]

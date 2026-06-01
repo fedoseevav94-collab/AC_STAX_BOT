@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -100,6 +100,13 @@ def callback_username(callback: CallbackQuery) -> str | None:
 
 def now_moscow() -> datetime:
     return datetime.now(MOSCOW_TZ).replace(tzinfo=None)
+
+
+def previous_month_text() -> str:
+    current = now_moscow()
+    first_day = current.replace(day=1)
+    previous_month_last_day = first_day - timedelta(days=1)
+    return previous_month_last_day.strftime("%Y-%m")
 
 
 def remember_user(user) -> None:
@@ -545,6 +552,21 @@ async def report_month_button(callback: CallbackQuery) -> None:
     await callback.message.answer_document(
         BufferedInputFile(data, filename=f"car-rentals-{year_month}.xlsx"),
         caption=f"Отчет за {year_month}: {len(rows)} записей.",
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "report:previous_month")
+async def report_previous_month_button(callback: CallbackQuery) -> None:
+    if not is_report_callback(callback):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    year_month = previous_month_text()
+    rows = storage.monthly_report_rows(year_month)
+    data = build_report_xlsx(rows, year_month)
+    await callback.message.answer_document(
+        BufferedInputFile(data, filename=f"car-rentals-{year_month}.xlsx"),
+        caption=f"Отчет за прошлый месяц ({year_month}): {len(rows)} записей.",
     )
     await callback.answer()
 
