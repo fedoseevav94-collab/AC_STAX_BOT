@@ -20,8 +20,9 @@ from openpyxl.utils import get_column_letter
 from bot.config import load_config
 from bot.dates import parse_return_plan
 from bot.keyboards import (
-    admin_rental_controls,
+    admin_approval_controls,
     condition_menu,
+    employee_reapproval_controls,
     model_by_index,
     model_category,
     model_legend,
@@ -193,8 +194,45 @@ async def send_to_work_chat(bot: Bot, file_ids: list[str], summary: str) -> None
     await bot.send_media_group(chat_id=work_chat_id, media=media)
 
 
-async def send_admin_controls(bot: Bot, rental) -> None:
+async def publish_rental_to_work_chat(bot: Bot, rental) -> None:
     is_test_drive = is_test_drive_rental(rental)
+    public_no = rental.rental_no or rental.id
+    title = f"Тест драйв #{public_no}" if is_test_drive else f"Выдача #{public_no}"
+    comment = (
+        f"Согласовано: {comment_text(rental.return_comment)}"
+        if is_test_drive
+        else rental.take_comment
+    )
+    await send_to_work_chat(
+        bot,
+        storage.get_rental_photo_file_ids(rental.id),
+        format_application(
+            title,
+            rental.employee_name or "Без ФИО",
+            rental.username,
+            rental.user_id,
+            rental.model,
+            rental.plate,
+            rental.created_at,
+            rental.planned_return_at,
+            rental.return_text,
+            rental.days,
+            comment,
+            0 if is_test_drive else rental.total,
+        ),
+    )
+
+
+async def send_admin_approval_request(bot: Bot, rental, note: str = "Новая заявка на согласование.") -> bool:
+    is_test_drive = is_test_drive_rental(rental)
+    public_no = rental.rental_no or rental.id
+    title = f"Тест драйв #{public_no}" if is_test_drive else f"Выдача #{public_no}"
+    comment = (
+        f"Согласовано: {comment_text(rental.return_comment)}"
+        if is_test_drive
+        else rental.take_comment
+    )
+    sent = False
     for admin_username in ADMIN_CONTROL_USERNAMES:
         admin_user_id = storage.get_setting(f"user_id:{admin_username}")
         if not admin_user_id:
@@ -202,15 +240,31 @@ async def send_admin_controls(bot: Bot, rental) -> None:
         try:
             await bot.send_message(
                 chat_id=int(admin_user_id),
-                text=(
-                    f"Управление заявкой #{rental.rental_no or rental.id}\n"
-                    f"{rental.employee_name or 'Без ФИО'}: {rental.model} {rental.plate}\n"
-                    f"Текущая сумма: {rental.total or 0} руб."
+                text="\n\n".join(
+                    [
+                        note,
+                        format_application(
+                            title,
+                            rental.employee_name or "Без ФИО",
+                            rental.username,
+                            rental.user_id,
+                            rental.model,
+                            rental.plate,
+                            rental.created_at,
+                            rental.planned_return_at,
+                            rental.return_text,
+                            rental.days,
+                            comment,
+                            0 if is_test_drive else rental.total,
+                        ),
+                    ]
                 ),
-                reply_markup=admin_rental_controls(rental.id, is_test_drive=is_test_drive),
+                reply_markup=admin_approval_controls(rental.id),
             )
+            sent = True
         except Exception:
             pass
+    return sent
 
 
 def effective_work_chat_id() -> int | None:
@@ -343,33 +397,20 @@ async def process_messages(messages: list[Message]) -> None:
             total=total,
         )
         rental = storage.get_by_id(rental_id)
+        storage.set_rental_photo_file_ids(rental_id, photo_file_ids(messages))
         public_no = rental.rental_no if rental and rental.rental_no else rental_id
         notes = [f"Зафиксировал выдачу #{public_no}: {take.model} {take.plate}, {take.days} дн., сумма {total} руб."]
         if not check.allowed:
             notes.append("По правилам выдача не проходит: " + " ".join(check.warnings))
         elif check.warnings:
             notes.extend(check.warnings)
-        notes.append("Фото отправлены в рабочий чат." if effective_work_chat_id() else "Рабочий чат не задан, фото никуда не отправлены.")
-        await send_to_work_chat(
-            text_message.bot,
-            photo_file_ids(messages),
-            format_application(
-                f"Выдача #{public_no}",
-                employee_name(text_message),
-                username(text_message),
-                text_message.from_user.id,
-                take.model,
-                take.plate,
-                rental.created_at if rental else None,
-                rental.planned_return_at if rental else None,
-                take.return_text,
-                take.days,
-                None,
-                total,
-            ),
-        )
         if rental:
-            await send_admin_controls(text_message.bot, rental)
+            admin_sent = await send_admin_approval_request(text_message.bot, rental)
+            notes.append(
+                "Заявка отправлена на согласование."
+                if admin_sent
+                else "Заявка сохранена, но админ еще не запускал бота в личке. Напишите ответственному."
+            )
         summary = await text_message.reply("\n".join(notes))
         storage.update_take_message_id(rental_id, summary.message_id)
         return
@@ -678,8 +719,27 @@ async def paid_command(message: Message) -> None:
     await message.reply("Списание отмечено." if ok else "Не нашел возврат по сообщению, на которое вы ответили.")
 
 
-@dp.callback_query(F.data.startswith("rent:set_amount:"))
-async def admin_set_amount_start(callback: CallbackQuery, state: FSMContext) -> None:
+@dp.callback_query(F.data.startswith("rent:approve:"))
+async def admin_approve_rental(callback: CallbackQuery) -> None:
+    if not is_admin_control_user(callback):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    rental_id = int(callback.data.rsplit(":", 1)[1])
+    rental = storage.set_approval_status(rental_id, "approved")
+    if rental is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    await publish_rental_to_work_chat(callback.message.bot, rental)
+    await callback.message.edit_text(
+        f"Заявка #{rental.rental_no or rental.id} одобрена и отправлена в рабочий чат.\n"
+        f"{rental.employee_name or 'Без ФИО'}: {rental.model} {rental.plate}\n"
+        f"Сумма: {0 if is_test_drive_rental(rental) else (rental.total or 0)} руб."
+    )
+    await callback.answer("Одобрено")
+
+
+@dp.callback_query(F.data.startswith("rent:approve_amount:"))
+async def admin_approve_amount_start(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin_control_user(callback):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
@@ -691,7 +751,7 @@ async def admin_set_amount_start(callback: CallbackQuery, state: FSMContext) -> 
     await state.update_data(admin_rental_id=rental_id)
     await state.set_state(AdminAmountFlow.amount)
     await callback.message.answer(
-        f"Введите новую сумму аренды для заявки #{rental.rental_no or rental.id} одним числом, например: 1700"
+        f"Введите сумму аренды для заявки #{rental.rental_no or rental.id} одним числом, например: 1700"
     )
     await callback.answer()
 
@@ -708,69 +768,107 @@ async def admin_set_amount_finish(message: Message, state: FSMContext) -> None:
         return
     data = await state.get_data()
     rental_id = int(data["admin_rental_id"])
-    rental = storage.set_total(rental_id, int(raw_amount))
+    rental = storage.set_total(rental_id, int(raw_amount), approval_status="approved_manual")
     await state.clear()
     if rental is None:
         await message.answer("Заявка не найдена.")
         return
+    await publish_rental_to_work_chat(message.bot, rental)
     await message.answer(
-        f"Сумма по заявке #{rental.rental_no or rental.id} изменена на {rental.total or 0} руб.",
-        reply_markup=admin_rental_controls(rental.id, is_test_drive=is_test_drive_rental(rental)),
+        f"Заявка #{rental.rental_no or rental.id} одобрена, сумма изменена на {rental.total or 0} руб. "
+        "Заявка отправлена в рабочий чат."
     )
 
 
-@dp.callback_query(F.data.startswith("rent:to_test:"))
-async def admin_switch_to_test_drive(callback: CallbackQuery) -> None:
+@dp.callback_query(F.data.startswith("rent:reject:"))
+async def admin_reject_rental(callback: CallbackQuery) -> None:
     if not is_admin_control_user(callback):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
     rental_id = int(callback.data.rsplit(":", 1)[1])
-    rental = storage.set_test_drive_status(rental_id, is_test_drive=True, rate=0, total=0)
+    rental = storage.set_approval_status(rental_id, "rejected")
     if rental is None:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
+    employee_notified = True
+    try:
+        await callback.message.bot.send_message(
+            chat_id=rental.user_id,
+            text=(
+                f"Заявка #{rental.rental_no or rental.id} пока не одобрена.\n"
+                "Свяжитесь с @Fedos_AV в личные сообщения. После согласования нажмите кнопку ниже."
+            ),
+            reply_markup=employee_reapproval_controls(rental.id),
+        )
+    except Exception:
+        employee_notified = False
     await callback.message.edit_text(
-        f"Заявка #{rental.rental_no or rental.id} переведена в тест-драйв.\n"
+        f"Заявка #{rental.rental_no or rental.id} не одобрена.\n"
         f"{rental.employee_name or 'Без ФИО'}: {rental.model} {rental.plate}\n"
-        "Сумма: 0 руб.",
-        reply_markup=admin_rental_controls(rental.id, is_test_drive=True),
+        + (
+            "Сотруднику отправлено сообщение."
+            if employee_notified
+            else "Не смог написать сотруднику в ЛС. Возможно, он не запускал бота."
+        )
     )
-    await callback.answer("Готово")
+    await callback.answer("Отказано")
 
 
-@dp.callback_query(F.data.startswith("rent:to_rent:"))
-async def admin_switch_to_rent(callback: CallbackQuery) -> None:
-    if not is_admin_control_user(callback):
-        await callback.answer("Недостаточно прав", show_alert=True)
-        return
+@dp.callback_query(F.data.startswith("rent:resubmit:"))
+async def employee_resubmit_rental(callback: CallbackQuery) -> None:
     rental_id = int(callback.data.rsplit(":", 1)[1])
     rental = storage.get_by_id(rental_id)
     if rental is None:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
-    rate, total = rental_price(rental.model, max(1, rental.days), rental.planned_return_at, rental.created_at)
-    rental = storage.set_test_drive_status(rental_id, is_test_drive=False, rate=rate, total=total)
+    if callback.from_user.id != rental.user_id:
+        await callback.answer("Это кнопка другого сотрудника", show_alert=True)
+        return
+    rental = storage.set_approval_status(rental_id, "resubmitted")
     if rental is None:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
-    await callback.message.edit_text(
-        f"Заявка #{rental.rental_no or rental.id} переведена в аренду.\n"
-        f"{rental.employee_name or 'Без ФИО'}: {rental.model} {rental.plate}\n"
-        f"Сумма: {rental.total or 0} руб.",
-        reply_markup=admin_rental_controls(rental.id, is_test_drive=False),
+    admin_sent = await send_admin_approval_request(
+        callback.message.bot,
+        rental,
+        note="Сотрудник написал, что связался и согласовал. Проверьте заявку повторно.",
     )
-    await callback.answer("Готово")
+    await callback.message.edit_text(
+        "Заявка повторно отправлена на согласование."
+        if admin_sent
+        else "Заявка сохранена, но админ еще не запускал бота в личке. Напишите @Fedos_AV напрямую."
+    )
+    await callback.answer("Отправлено")
+
+
+@dp.callback_query(F.data.startswith("rent:employee_cancel:"))
+async def employee_cancel_rental(callback: CallbackQuery) -> None:
+    rental_id = int(callback.data.rsplit(":", 1)[1])
+    rental = storage.get_by_id(rental_id)
+    if rental is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    if callback.from_user.id != rental.user_id:
+        await callback.answer("Это кнопка другого сотрудника", show_alert=True)
+        return
+    storage.set_approval_status(rental_id, "employee_cancelled")
+    await callback.message.edit_text(
+        f"Заявка #{rental.rental_no or rental.id} отменена. В рабочий чат она не отправлялась."
+    )
+    await callback.answer("Отменено")
 
 
 @dp.callback_query(F.data == "car:take")
 async def start_take(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    started_at = now_moscow().isoformat(timespec="seconds")
     if not has_employee_name(callback.from_user):
-        await state.update_data(pending_action="take")
+        await state.update_data(pending_action="take", started_at=started_at)
         await state.set_state(ProfileFlow.name)
         await callback.message.answer("Введите ваше ФИО один раз, чтобы бот корректно формировал отчеты.")
         await callback.answer()
         return
+    await state.update_data(started_at=started_at)
     await state.set_state(TakeFlow.model)
     await callback.message.answer(f"Выберите марку авто:\n\n{model_legend()}", reply_markup=model_menu())
     await callback.answer()
@@ -903,7 +1001,8 @@ async def take_photos(message: Message, state: FSMContext) -> None:
         return
 
     check = check_take_rules(config, take, username(message))
-    rate, total = rental_price(take.model, take.days, data.get("planned_return_at"))
+    started_at = data.get("started_at")
+    rate, total = rental_price(take.model, take.days, data.get("planned_return_at"), started_at)
     rental_id = storage.create_take(
         chat_id=message.chat.id,
         message_id=first_photo_message_id,
@@ -920,33 +1019,21 @@ async def take_photos(message: Message, state: FSMContext) -> None:
         take_comment=data.get("take_comment"),
         rate=rate,
         total=total,
+        created_at=started_at,
     )
     rental = storage.get_by_id(rental_id)
+    storage.set_rental_photo_file_ids(rental_id, list(data.get("photo_file_ids", [])))
     public_no = rental.rental_no if rental and rental.rental_no else rental_id
     notes = [f"Заявка на выдачу #{public_no} зафиксирована: {take.model} {take.plate}, {take.days} дн., сумма {total} руб."]
     if check.warnings:
         notes.extend(check.warnings)
-    notes.append("Фото отправлены в рабочий чат." if effective_work_chat_id() else "Рабочий чат не задан, фото никуда не отправлены.")
-    await send_to_work_chat(
-        message.bot,
-        list(data.get("photo_file_ids", [])),
-        format_application(
-            f"Выдача #{public_no}",
-            employee_name(message),
-            username(message),
-            message.from_user.id,
-            take.model,
-            take.plate,
-            rental.created_at if rental else None,
-            rental.planned_return_at if rental else data.get("planned_return_at"),
-            take.return_text,
-            take.days,
-            data.get("take_comment"),
-            total,
-        ),
-    )
     if rental:
-        await send_admin_controls(message.bot, rental)
+        admin_sent = await send_admin_approval_request(message.bot, rental)
+        notes.append(
+            "Заявка отправлена на согласование."
+            if admin_sent
+            else "Заявка сохранена, но админ еще не запускал бота в личке. Напишите ответственному."
+        )
     summary = await message.answer("\n".join(notes))
     storage.update_take_message_id(rental_id, summary.message_id)
     await state.clear()
@@ -977,12 +1064,14 @@ async def start_return(callback: CallbackQuery, state: FSMContext) -> None:
 @dp.callback_query(F.data == "car:test_drive")
 async def start_test_drive(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    started_at = now_moscow().isoformat(timespec="seconds")
     if not has_employee_name(callback.from_user):
-        await state.update_data(pending_action="test_drive")
+        await state.update_data(pending_action="test_drive", started_at=started_at)
         await state.set_state(ProfileFlow.name)
         await callback.message.answer("Введите ваше ФИО один раз, чтобы бот корректно формировал отчеты.")
         await callback.answer()
         return
+    await state.update_data(started_at=started_at)
     await state.set_state(TestDriveFlow.model)
     await callback.message.answer(f"Выберите марку авто для тест драйва:\n\n{model_legend()}", reply_markup=model_menu("test_model"))
     await callback.answer()
@@ -1060,31 +1149,19 @@ async def test_drive_photos(message: Message, state: FSMContext) -> None:
         plate=data["plate"],
         photo_count=count,
         comment=data["test_comment"],
+        created_at=data.get("started_at"),
     )
     rental = storage.get_by_id(rental_id)
+    storage.set_rental_photo_file_ids(rental_id, list(data.get("photo_file_ids", [])))
     public_no = rental.rental_no if rental and rental.rental_no else rental_id
     notes = [f"Тест драйв #{public_no} зафиксирован: {data['model']} {data['plate']}, бесплатно."]
-    notes.append("Фото отправлены в рабочий чат." if effective_work_chat_id() else "Рабочий чат не задан, фото никуда не отправлены.")
-    await send_to_work_chat(
-        message.bot,
-        list(data.get("photo_file_ids", [])),
-        format_application(
-            f"Тест драйв #{public_no}",
-            employee_name(message),
-            username(message),
-            message.from_user.id,
-            data["model"],
-            data["plate"],
-            rental.created_at if rental else None,
-            None,
-            "тест драйв",
-            0,
-            f"Согласовано: {data['test_comment']}",
-            0,
-        ),
-    )
     if rental:
-        await send_admin_controls(message.bot, rental)
+        admin_sent = await send_admin_approval_request(message.bot, rental)
+        notes.append(
+            "Заявка отправлена на согласование."
+            if admin_sent
+            else "Заявка сохранена, но админ еще не запускал бота в личке. Напишите ответственному."
+        )
     await message.answer("\n".join(notes))
     await state.clear()
 

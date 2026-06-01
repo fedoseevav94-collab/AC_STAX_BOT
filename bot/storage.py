@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import sqlite3
 from zoneinfo import ZoneInfo
 
@@ -131,9 +132,10 @@ class Storage:
         take_comment: str | None = None,
         rate: int | None = None,
         total: int | None = None,
+        created_at: str | None = None,
     ) -> int:
         with self.connect() as conn:
-            created_at = now_moscow_iso()
+            created_at = created_at or now_moscow_iso()
             rental_month = created_at[:7]
             row = conn.execute(
                 "SELECT COALESCE(MAX(rental_no), 0) + 1 AS next_no FROM rentals WHERE rental_month = ?",
@@ -144,9 +146,9 @@ class Storage:
                 """
                 INSERT INTO rentals (
                     rental_no, rental_month, chat_id, take_message_id, user_id, username, employee_name, model, plate, days, return_text,
-                    planned_return_at, night_shift, photo_count_take, take_comment, rate, total, status, created_at
+                    planned_return_at, night_shift, photo_count_take, take_comment, rate, total, approval_status, status, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'taken', ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'taken', ?)
                 """,
                 (
                     rental_no,
@@ -182,9 +184,10 @@ class Storage:
         plate: str,
         photo_count: int,
         comment: str,
+        created_at: str | None = None,
     ) -> int:
         with self.connect() as conn:
-            created_at = now_moscow_iso()
+            created_at = created_at or now_moscow_iso()
             rental_month = created_at[:7]
             row = conn.execute(
                 "SELECT COALESCE(MAX(rental_no), 0) + 1 AS next_no FROM rentals WHERE rental_month = ?",
@@ -197,10 +200,10 @@ class Storage:
                     rental_no, rental_month, chat_id, take_message_id, return_message_id,
                     user_id, username, employee_name, model, plate, days, return_text,
                     planned_return_at, night_shift, photo_count_take, photo_count_return,
-                    take_comment, return_comment, condition_status, rate, total,
+                    take_comment, return_comment, condition_status, rate, total, approval_status,
                     status, paid, created_at, returned_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', NULL, 0, ?, ?, ?, ?, 'test_drive', 0, 0, 'returned', 1, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', NULL, 0, ?, ?, ?, ?, 'test_drive', 0, 0, 'pending', 'returned', 1, ?, ?)
                 """,
                 (
                     rental_no,
@@ -264,6 +267,7 @@ class Storage:
                 """
                 SELECT * FROM rentals
                 WHERE chat_id = ? AND plate = ? AND status = 'taken'
+                    AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
                 ORDER BY id DESC
                 LIMIT 1
                 """,
@@ -290,12 +294,18 @@ class Storage:
             conn.commit()
             return self.get_by_id(row["id"])
 
-    def set_total(self, rental_id: int, total: int) -> Rental | None:
+    def set_total(self, rental_id: int, total: int, approval_status: str = "manual") -> Rental | None:
         with self.connect() as conn:
             conn.execute(
                 "UPDATE rentals SET total = ?, approval_status = ? WHERE id = ?",
-                (total, "manual", rental_id),
+                (total, approval_status, rental_id),
             )
+            conn.commit()
+            return self.get_by_id(rental_id)
+
+    def set_approval_status(self, rental_id: int, approval_status: str) -> Rental | None:
+        with self.connect() as conn:
+            conn.execute("UPDATE rentals SET approval_status = ? WHERE id = ?", (approval_status, rental_id))
             conn.commit()
             return self.get_by_id(rental_id)
 
@@ -333,6 +343,7 @@ class Storage:
                 """
                 SELECT * FROM rentals
                 WHERE chat_id = ? AND user_id = ? AND status = 'taken'
+                    AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
                 ORDER BY id DESC
                 """,
                 (chat_id, user_id),
@@ -362,6 +373,7 @@ class Storage:
                     photo_count_take, photo_count_return
                 FROM rentals
                 WHERE substr(created_at, 1, 7) = ?
+                    AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
                 {employee_filter}
                 ORDER BY lower(coalesce(employee_name, username, '')), days DESC, created_at
                 """,
@@ -380,6 +392,7 @@ class Storage:
                     SUM(days) AS total_days
                 FROM rentals
                 WHERE substr(created_at, 1, 7) = ?
+                    AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
                 GROUP BY user_id, username, employee_name
                 ORDER BY lower(coalesce(employee_name, username, ''))
                 """,
@@ -399,6 +412,21 @@ class Storage:
 
     def get_employee_name(self, user_id: int) -> str | None:
         return self.get_setting(f"employee_name:{user_id}")
+
+    def set_rental_photo_file_ids(self, rental_id: int, file_ids: list[str]) -> None:
+        self.set_setting(f"rental_photo_file_ids:{rental_id}", json.dumps(file_ids, ensure_ascii=False))
+
+    def get_rental_photo_file_ids(self, rental_id: int) -> list[str]:
+        value = self.get_setting(f"rental_photo_file_ids:{rental_id}")
+        if not value:
+            return []
+        try:
+            loaded = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(loaded, list):
+            return []
+        return [str(item) for item in loaded if item]
 
     def mark_paid_by_return_message(self, chat_id: int, return_message_id: int) -> bool:
         with self.connect() as conn:
@@ -423,7 +451,13 @@ class Storage:
 
     def active_count(self) -> int:
         with self.connect() as conn:
-            row = conn.execute("SELECT COUNT(*) AS count FROM rentals WHERE status = 'taken'").fetchone()
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count FROM rentals
+                WHERE status = 'taken'
+                    AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
+                """
+            ).fetchone()
             return int(row["count"])
 
     def set_setting(self, key: str, value: str) -> None:

@@ -92,15 +92,20 @@ def skip_take_comment_menu() -> InlineKeyboardMarkup:
     )
 
 
-def admin_rental_controls(rental_id: int, is_test_drive: bool = False) -> InlineKeyboardMarkup:
-    status_button = (
-        InlineKeyboardButton(text="Сменить на аренду", callback_data=f"rent:to_rent:{rental_id}")
-        if is_test_drive
-        else InlineKeyboardButton(text="Сменить на тест драйв", callback_data=f"rent:to_test:{rental_id}")
-    )
+def admin_approval_controls(rental_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Изменить стоимость аренды", callback_data=f"rent:set_amount:{rental_id}")],
-            [status_button],
+            [InlineKeyboardButton(text="Одобрить без изменений", callback_data=f"rent:approve:{rental_id}")],
+            [InlineKeyboardButton(text="Одобрить и изменить сумму", callback_data=f"rent:approve_amount:{rental_id}")],
+            [InlineKeyboardButton(text="Не одобрено", callback_data=f"rent:reject:{rental_id}")],
+        ]
+    )
+
+
+def employee_reapproval_controls(rental_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Связался и согласовал", callback_data=f"rent:resubmit:{rental_id}")],
+            [InlineKeyboardButton(text="В выдаче отказано", callback_data=f"rent:employee_cancel:{rental_id}")],
         ]
     )
