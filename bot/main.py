@@ -31,7 +31,7 @@ from bot.keyboards import (
     start_menu,
     tariff_controls,
 )
-from bot.parser import parse_approval, parse_return, parse_take
+from bot.parser import normalize_plate, parse_approval, parse_return, parse_take
 from bot.rules import check_take_rules, validate_approval
 from bot.storage import Storage
 
@@ -510,6 +510,7 @@ async def process_messages(messages: list[Message]) -> None:
             photos,
             return_comment=returned.comment or None,
             condition_status="comment" if returned.comment else None,
+            user_id=text_message.from_user.id if text_message.from_user else None,
         )
         if rental is None:
             await text_message.reply("Не нашел активную выдачу по этому номеру. Проверьте номер или формат.")
@@ -1126,7 +1127,7 @@ async def take_model(message: Message, state: FSMContext) -> None:
 
 @dp.message(TakeFlow.plate)
 async def take_plate(message: Message, state: FSMContext) -> None:
-    plate = (message.text or "").strip().upper().replace(" ", "")
+    plate = normalize_plate(message.text or "")
     await state.update_data(plate=plate)
     await state.set_state(TakeFlow.return_text)
     await message.answer("Когда возврат? Например: завтра 18:30, 29 августа 20:00, 29.08.2026 12:00.")
@@ -1304,7 +1305,7 @@ async def test_drive_model(message: Message, state: FSMContext) -> None:
 
 @dp.message(TestDriveFlow.plate)
 async def test_drive_plate(message: Message, state: FSMContext) -> None:
-    await state.update_data(plate=(message.text or "").strip().upper().replace(" ", ""))
+    await state.update_data(plate=normalize_plate(message.text or ""))
     await state.set_state(TestDriveFlow.comment)
     await message.answer("Напишите, с кем согласован тест драйв. Это обязательный комментарий.")
 
@@ -1380,7 +1381,7 @@ async def test_drive_photos_wrong(message: Message) -> None:
 
 @dp.message(ReturnFlow.plate)
 async def return_plate(message: Message, state: FSMContext) -> None:
-    await state.update_data(plate=(message.text or "").strip().upper().replace(" ", ""))
+    await state.update_data(plate=normalize_plate(message.text or ""))
     await state.set_state(ReturnFlow.condition)
     await message.answer("Опишите недостатки машины или нажмите кнопку:", reply_markup=condition_menu())
 
@@ -1437,6 +1438,7 @@ async def return_photos(message: Message, state: FSMContext) -> None:
         count,
         return_comment=data.get("return_comment"),
         condition_status=data.get("condition_status"),
+        user_id=message.from_user.id if message.from_user else None,
     )
     if rental is None:
         await message.answer("Не нашел активную выдачу по этому номеру. Проверьте номер или обратитесь к ответственному.")

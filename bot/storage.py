@@ -3,15 +3,36 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import re
 import sqlite3
 from zoneinfo import ZoneInfo
 
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+LATIN_TO_CYRILLIC_PLATE = str.maketrans(
+    {
+        "A": "А",
+        "B": "В",
+        "E": "Е",
+        "K": "К",
+        "M": "М",
+        "H": "Н",
+        "O": "О",
+        "P": "Р",
+        "C": "С",
+        "T": "Т",
+        "Y": "У",
+        "X": "Х",
+    }
+)
 
 
 def now_moscow_iso() -> str:
     return datetime.now(MOSCOW_TZ).replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def normalize_plate(plate: str) -> str:
+    return re.sub(r"\s+", "", plate or "").upper().translate(LATIN_TO_CYRILLIC_PLATE)
 
 
 @dataclass(frozen=True)
@@ -261,18 +282,26 @@ class Storage:
         photo_count: int,
         return_comment: str | None = None,
         condition_status: str | None = None,
+        user_id: int | None = None,
     ) -> Rental | None:
         with self.connect() as conn:
-            row = conn.execute(
-                """
+            params: list[int] = []
+            user_filter = ""
+            if user_id is not None:
+                user_filter = "AND user_id = ?"
+                params.append(user_id)
+            rows = conn.execute(
+                f"""
                 SELECT * FROM rentals
-                WHERE chat_id = ? AND plate = ? AND status = 'taken'
+                WHERE status = 'taken'
                     AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
+                    {user_filter}
                 ORDER BY id DESC
-                LIMIT 1
                 """,
-                (chat_id, plate),
-            ).fetchone()
+                params,
+            ).fetchall()
+            normalized_plate = normalize_plate(plate)
+            row = next((candidate for candidate in rows if normalize_plate(candidate["plate"]) == normalized_plate), None)
             if row is None:
                 return None
             conn.execute(
@@ -342,11 +371,11 @@ class Storage:
             rows = conn.execute(
                 """
                 SELECT * FROM rentals
-                WHERE chat_id = ? AND user_id = ? AND status = 'taken'
+                WHERE user_id = ? AND status = 'taken'
                     AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
                 ORDER BY id DESC
                 """,
-                (chat_id, user_id),
+                (user_id,),
             ).fetchall()
             return [_rental(row) for row in rows]
 

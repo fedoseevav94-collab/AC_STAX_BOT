@@ -12,6 +12,23 @@ TAKE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+LATIN_TO_CYRILLIC_PLATE = str.maketrans(
+    {
+        "A": "А",
+        "B": "В",
+        "E": "Е",
+        "K": "К",
+        "M": "М",
+        "H": "Н",
+        "O": "О",
+        "P": "Р",
+        "C": "С",
+        "T": "Т",
+        "Y": "У",
+        "X": "Х",
+    }
+)
+
 RETURN_RE = re.compile(
     r"^\s*(?:вернул|сдал)\s+(?:(?P<model>.+?)\s+)?(?P<plate>[АВЕКМНОРСТУХABEKMHOPCTYX]\s?\d{3}\s?[АВЕКМНОРСТУХABEKMHOPCTYX]{2}\s?\d{2,3})"
     r"(?:\s*,?\s*аренда\s+(?P<days>\d+)\s+д(?:ень|ня|ней|н[яе]))?(?P<comment>.*)\s*$",
@@ -55,7 +72,7 @@ class Approval:
 
 
 def normalize_plate(plate: str) -> str:
-    return re.sub(r"\s+", "", plate).upper()
+    return re.sub(r"\s+", "", plate).upper().translate(LATIN_TO_CYRILLIC_PLATE)
 
 
 def normalize_model(model: str) -> str:
