@@ -302,6 +302,20 @@ class Storage:
             ).fetchall()
             normalized_plate = normalize_plate(plate)
             row = next((candidate for candidate in rows if normalize_plate(candidate["plate"]) == normalized_plate), None)
+            if row is None and user_id is not None:
+                fallback_rows = conn.execute(
+                    """
+                    SELECT * FROM rentals
+                    WHERE status = 'taken'
+                        AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
+                    ORDER BY id DESC
+                    """
+                ).fetchall()
+                plate_matches = [
+                    candidate for candidate in fallback_rows if normalize_plate(candidate["plate"]) == normalized_plate
+                ]
+                if len(plate_matches) == 1:
+                    row = plate_matches[0]
             if row is None:
                 return None
             conn.execute(
