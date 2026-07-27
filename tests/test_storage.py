@@ -35,6 +35,7 @@ def test_return_lookup_ignores_chat_and_normalizes_plate(tmp_path):
     assert rental is not None
     assert rental.id == rental_id
     assert rental.status == "returned"
+    assert rental.return_user_id == 777
 
 
 def test_return_lookup_allows_another_employee_for_unique_plate(tmp_path):
@@ -71,3 +72,40 @@ def test_return_lookup_allows_another_employee_for_unique_plate(tmp_path):
     assert rental is not None
     assert rental.id == rental_id
     assert rental.status == "returned"
+    assert rental.return_user_id == 888
+
+
+def test_return_plate_can_be_corrected(tmp_path):
+    db_path = tmp_path / "bot.sqlite3"
+    storage = Storage(str(db_path))
+    rental_id = storage.create_take(
+        chat_id=111,
+        message_id=2,
+        user_id=777,
+        username="driver",
+        employee_name="Иван Иванов",
+        model="KIA K5",
+        plate="Е899СМ761",
+        days=1,
+        return_text="завтра",
+        planned_return_at="2026-07-22T10:00",
+        night_shift=False,
+        photo_count=5,
+        total=1700,
+        created_at="2026-07-21T10:00:00",
+    )
+    storage.set_approval_status(rental_id, "approved")
+    storage.mark_returned(
+        chat_id=222,
+        message_id=9,
+        plate="Е899СМ761",
+        photo_count=5,
+        return_comment="Машина полностью исправна",
+        condition_status="ok",
+        user_id=777,
+    )
+
+    rental = storage.update_plate(rental_id, "T339BT159")
+
+    assert rental is not None
+    assert rental.plate == "Т339ВТ159"

@@ -124,3 +124,11 @@ def tariff_controls() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Эконом 12 часов", callback_data="tariff:set:economy_half")],
         ]
     )
+
+
+def return_plate_correction_controls(rental_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Изменить номер", callback_data=f"return:change_plate:{rental_id}")],
+        ]
+    )

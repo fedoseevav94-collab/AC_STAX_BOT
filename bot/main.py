@@ -27,6 +27,7 @@ from bot.keyboards import (
     model_category,
     model_legend,
     model_menu,
+    return_plate_correction_controls,
     skip_take_comment_menu,
     start_menu,
     tariff_controls,
@@ -82,6 +83,10 @@ class ReturnFlow(StatesGroup):
     plate = State()
     condition = State()
     photos = State()
+
+
+class ReturnPlateCorrectionFlow(StatesGroup):
+    plate = State()
 
 
 class TestDriveFlow(StatesGroup):
@@ -202,18 +207,18 @@ def photo_file_ids(messages: list[Message]) -> list[str]:
     return [message.photo[-1].file_id for message in messages if message.photo]
 
 
-async def send_to_work_chat(bot: Bot, file_ids: list[str], summary: str) -> None:
+async def send_to_work_chat(bot: Bot, file_ids: list[str], summary: str) -> list[Message]:
     work_chat_id = effective_work_chat_id()
     if work_chat_id is None:
-        return
+        return []
     if not file_ids:
-        await bot.send_message(chat_id=work_chat_id, text=summary)
-        return
+        message = await bot.send_message(chat_id=work_chat_id, text=summary)
+        return [message]
     media = [
         InputMediaPhoto(media=file_id, caption=summary if index == 0 else None)
         for index, file_id in enumerate(file_ids)
     ]
-    await bot.send_media_group(chat_id=work_chat_id, media=media)
+    return await bot.send_media_group(chat_id=work_chat_id, media=media)
 
 
 async def publish_rental_to_work_chat(bot: Bot, rental) -> None:
@@ -403,6 +408,34 @@ def format_application(
     )
 
 
+def format_return_application(rental, comment: str | None = None, model: str | None = None, days: int | None = None) -> str:
+    return format_application(
+        f"Сдача #{rental.rental_no or rental.id}",
+        rental.employee_name or "Без ФИО",
+        rental.username,
+        rental.user_id,
+        model or rental.model,
+        rental.plate,
+        rental.created_at,
+        rental.planned_return_at,
+        rental.return_text,
+        days if days is not None else rental.days,
+        comment if comment is not None else rental.return_comment,
+        rental.total,
+    )
+
+
+async def send_return_plate_correction_control(bot: Bot, rental) -> None:
+    work_chat_id = effective_work_chat_id()
+    if work_chat_id is None:
+        return
+    await bot.send_message(
+        chat_id=work_chat_id,
+        text=f"Сдача #{rental.rental_no or rental.id}: если госномер указан неверно, ответственный за сдачу может исправить его.",
+        reply_markup=return_plate_correction_controls(rental.id),
+    )
+
+
 def active_rental_line(rental, now: datetime | None = None) -> str:
     planned = format_dt(rental.planned_return_at)
     left_text = ""
@@ -519,24 +552,15 @@ async def process_messages(messages: list[Message]) -> None:
         days = returned.days or rental.days
         notes = [f"Зафиксировал возврат: {model} {returned.plate}, аренда {days} дн., сумма {rental.total or 0} руб."]
         notes.append("Фото отправлены в рабочий чат." if effective_work_chat_id() else "Рабочий чат не задан, фото никуда не отправлены.")
-        await send_to_work_chat(
+        sent_messages = await send_to_work_chat(
             text_message.bot,
             photo_file_ids(messages),
-            format_application(
-                f"Сдача #{rental.rental_no or rental.id}",
-                rental.employee_name or employee_name(text_message),
-                rental.username or username(text_message),
-                rental.user_id,
-                model,
-                returned.plate,
-                rental.created_at,
-                rental.planned_return_at,
-                rental.return_text,
-                days,
-                returned.comment,
-                rental.total,
-            ),
+            format_return_application(rental, comment=returned.comment, model=model, days=days),
         )
+        if sent_messages:
+            storage.update_return_work_message(rental.id, sent_messages[0].chat.id, sent_messages[0].message_id)
+            rental = storage.get_by_id(rental.id) or rental
+        await send_return_plate_correction_control(text_message.bot, rental)
         if rental.total and rental.total > 0:
             notes.append("После списания аренды отправьте /paid ответом на сообщение возврата.")
         summary = await text_message.reply("\n".join(notes))
@@ -1446,24 +1470,15 @@ async def return_photos(message: Message, state: FSMContext) -> None:
         return
     notes = [f"Возврат зафиксирован: {rental.model} {rental.plate}, сумма {rental.total or 0} руб."]
     notes.append("Фото отправлены в рабочий чат." if effective_work_chat_id() else "Рабочий чат не задан, фото никуда не отправлены.")
-    await send_to_work_chat(
+    sent_messages = await send_to_work_chat(
         message.bot,
         list(data.get("photo_file_ids", [])),
-        format_application(
-            f"Сдача #{rental.rental_no or rental.id}",
-            rental.employee_name or employee_name(message),
-            rental.username or username(message),
-            rental.user_id,
-            rental.model,
-            rental.plate,
-            rental.created_at,
-            rental.planned_return_at,
-            rental.return_text,
-            rental.days,
-            data.get("return_comment"),
-            rental.total,
-        ),
+        format_return_application(rental, comment=data.get("return_comment")),
     )
+    if sent_messages:
+        storage.update_return_work_message(rental.id, sent_messages[0].chat.id, sent_messages[0].message_id)
+        rental = storage.get_by_id(rental.id) or rental
+    await send_return_plate_correction_control(message.bot, rental)
     if rental.total and rental.total > 0:
         notes.append("После списания аренды ответственный отправляет /paid ответом на это сообщение.")
     summary = await message.answer("\n".join(notes))
@@ -1474,6 +1489,83 @@ async def return_photos(message: Message, state: FSMContext) -> None:
 @dp.message(ReturnFlow.photos)
 async def return_photos_wrong(message: Message) -> None:
     await message.answer("На этом шаге нужны 5 фото: 4 стороны авто и приборная панель с топливом.")
+
+
+@dp.callback_query(F.data.startswith("return:change_plate:"))
+async def return_change_plate_start(callback: CallbackQuery, state: FSMContext) -> None:
+    rental_id = int(callback.data.rsplit(":", 1)[1])
+    rental = storage.get_by_id(rental_id)
+    if rental is None:
+        await callback.answer("Сдача не найдена", show_alert=True)
+        return
+    if rental.return_user_id != callback.from_user.id:
+        await callback.answer("Изменить номер может только сотрудник, который провел эту сдачу.", show_alert=True)
+        return
+    await state.update_data(
+        correction_rental_id=rental_id,
+        correction_control_chat_id=callback.message.chat.id,
+        correction_control_message_id=callback.message.message_id,
+    )
+    await state.set_state(ReturnPlateCorrectionFlow.plate)
+    await callback.message.answer(
+        f"Введите правильный госномер для сдачи #{rental.rental_no or rental.id}, например: Т339ВТ159"
+    )
+    await callback.answer()
+
+
+@dp.message(ReturnPlateCorrectionFlow.plate)
+async def return_change_plate_finish(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    rental_id = int(data["correction_rental_id"])
+    rental = storage.get_by_id(rental_id)
+    if rental is None:
+        await message.answer("Сдача не найдена.")
+        await state.clear()
+        return
+    if not message.from_user or rental.return_user_id != message.from_user.id:
+        await message.answer("Изменить номер может только сотрудник, который провел эту сдачу.")
+        await state.clear()
+        return
+    new_plate = normalize_plate(message.text or "")
+    if not new_plate:
+        await message.answer("Не понял номер. Введите госномер, например: Т339ВТ159")
+        return
+    rental = storage.update_plate(rental_id, new_plate)
+    await state.clear()
+    if rental is None:
+        await message.answer("Сдача не найдена.")
+        return
+
+    updated_summary = format_return_application(rental)
+    if rental.return_work_chat_id and rental.return_work_message_id:
+        try:
+            await message.bot.edit_message_caption(
+                chat_id=rental.return_work_chat_id,
+                message_id=rental.return_work_message_id,
+                caption=updated_summary,
+            )
+        except Exception:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=rental.return_work_chat_id,
+                    message_id=rental.return_work_message_id,
+                    text=updated_summary,
+                )
+            except Exception:
+                pass
+
+    control_chat_id = data.get("correction_control_chat_id")
+    control_message_id = data.get("correction_control_message_id")
+    if control_chat_id and control_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=control_chat_id,
+                message_id=control_message_id,
+                text=f"Сдача #{rental.rental_no or rental.id}: госномер изменен на {rental.plate}.",
+            )
+        except Exception:
+            pass
+    await message.answer(f"Госномер в сдаче #{rental.rental_no or rental.id} изменен на {rental.plate}.")
 
 
 @dp.message(F.reply_to_message)

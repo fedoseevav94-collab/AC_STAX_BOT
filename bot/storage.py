@@ -61,6 +61,9 @@ class Rental:
     created_at: str
     returned_at: str | None
     approval_status: str | None
+    return_user_id: int | None
+    return_work_chat_id: int | None
+    return_work_message_id: int | None
 
 
 class Storage:
@@ -132,6 +135,9 @@ class Storage:
             "planned_return_at": "ALTER TABLE rentals ADD COLUMN planned_return_at TEXT",
             "rental_no": "ALTER TABLE rentals ADD COLUMN rental_no INTEGER",
             "rental_month": "ALTER TABLE rentals ADD COLUMN rental_month TEXT",
+            "return_user_id": "ALTER TABLE rentals ADD COLUMN return_user_id INTEGER",
+            "return_work_chat_id": "ALTER TABLE rentals ADD COLUMN return_work_chat_id INTEGER",
+            "return_work_message_id": "ALTER TABLE rentals ADD COLUMN return_work_message_id INTEGER",
         }.items():
             if name not in existing:
                 conn.execute(ddl)
@@ -322,7 +328,7 @@ class Storage:
                 """
                 UPDATE rentals
                 SET return_message_id = ?, photo_count_return = ?, return_comment = ?,
-                    condition_status = ?, status = 'returned', returned_at = ?
+                    condition_status = ?, return_user_id = ?, status = 'returned', returned_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -330,12 +336,30 @@ class Storage:
                     photo_count,
                     return_comment,
                     condition_status,
+                    user_id,
                     now_moscow_iso(),
                     row["id"],
                 ),
             )
             conn.commit()
             return self.get_by_id(row["id"])
+
+    def update_return_work_message(self, rental_id: int, chat_id: int, message_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE rentals
+                SET return_work_chat_id = ?, return_work_message_id = ?
+                WHERE id = ?
+                """,
+                (chat_id, message_id, rental_id),
+            )
+
+    def update_plate(self, rental_id: int, plate: str) -> Rental | None:
+        with self.connect() as conn:
+            conn.execute("UPDATE rentals SET plate = ? WHERE id = ?", (normalize_plate(plate), rental_id))
+            conn.commit()
+            return self.get_by_id(rental_id)
 
     def set_total(self, rental_id: int, total: int, approval_status: str = "manual") -> Rental | None:
         with self.connect() as conn:
@@ -558,4 +582,7 @@ def _rental(row: sqlite3.Row) -> Rental:
         created_at=row["created_at"],
         returned_at=row["returned_at"],
         approval_status=row["approval_status"],
+        return_user_id=row["return_user_id"],
+        return_work_chat_id=row["return_work_chat_id"],
+        return_work_message_id=row["return_work_message_id"],
     )
