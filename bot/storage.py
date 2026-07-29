@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import json
+from pathlib import Path
 import re
 import sqlite3
 from zoneinfo import ZoneInfo
@@ -48,6 +49,7 @@ class Rental:
     employee_name: str | None
     model: str
     plate: str
+    return_plate: str | None
     days: int
     return_text: str | None
     planned_return_at: str | None
@@ -74,6 +76,9 @@ class Storage:
         self._init()
 
     def connect(self) -> sqlite3.Connection:
+        parent = Path(self.path).expanduser().parent
+        if str(parent) not in ("", "."):
+            parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
         return conn
@@ -94,6 +99,7 @@ class Storage:
                     employee_name TEXT,
                     model TEXT NOT NULL,
                     plate TEXT NOT NULL,
+                    return_plate TEXT,
                     days INTEGER NOT NULL,
                     return_text TEXT,
                     planned_return_at TEXT,
@@ -142,6 +148,7 @@ class Storage:
             "return_employee_name": "ALTER TABLE rentals ADD COLUMN return_employee_name TEXT",
             "return_work_chat_id": "ALTER TABLE rentals ADD COLUMN return_work_chat_id INTEGER",
             "return_work_message_id": "ALTER TABLE rentals ADD COLUMN return_work_message_id INTEGER",
+            "return_plate": "ALTER TABLE rentals ADD COLUMN return_plate TEXT",
         }.items():
             if name not in existing:
                 conn.execute(ddl)
@@ -333,13 +340,14 @@ class Storage:
             conn.execute(
                 """
                 UPDATE rentals
-                SET return_message_id = ?, photo_count_return = ?, return_comment = ?,
+                SET return_message_id = ?, return_plate = ?, photo_count_return = ?, return_comment = ?,
                     condition_status = ?, return_user_id = ?, return_username = ?,
                     return_employee_name = ?, status = 'returned', returned_at = ?
                 WHERE id = ?
                 """,
                 (
                     message_id,
+                    normalized_plate,
                     photo_count,
                     return_comment,
                     condition_status,
@@ -353,7 +361,13 @@ class Storage:
             conn.commit()
             return self.get_by_id(row["id"])
 
-    def update_return_work_message(self, rental_id: int, chat_id: int, message_id: int) -> None:
+    def update_return_work_message(
+        self,
+        rental_id: int,
+        chat_id: int,
+        message_id: int,
+        message_ids: list[int] | None = None,
+    ) -> None:
         with self.connect() as conn:
             conn.execute(
                 """
@@ -363,10 +377,19 @@ class Storage:
                 """,
                 (chat_id, message_id, rental_id),
             )
+            if message_ids:
+                conn.execute(
+                    """
+                    INSERT INTO settings (key, value)
+                    VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (f"return_work_message_ids:{rental_id}", json.dumps(message_ids)),
+                )
 
-    def update_plate(self, rental_id: int, plate: str) -> Rental | None:
+    def update_return_plate(self, rental_id: int, plate: str) -> Rental | None:
         with self.connect() as conn:
-            conn.execute("UPDATE rentals SET plate = ? WHERE id = ?", (normalize_plate(plate), rental_id))
+            conn.execute("UPDATE rentals SET return_plate = ? WHERE id = ?", (normalize_plate(plate), rental_id))
             conn.commit()
             return self.get_by_id(rental_id)
 
@@ -379,11 +402,60 @@ class Storage:
             conn.commit()
             return self.get_by_id(rental_id)
 
+    def approve_waiting(self, rental_id: int, approval_status: str = "approved") -> Rental | None:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE rentals
+                SET approval_status = ?
+                WHERE id = ?
+                    AND approval_status IN ('pending', 'resubmitted')
+                """,
+                (approval_status, rental_id),
+            )
+            conn.commit()
+            return self.get_by_id(rental_id) if cursor.rowcount else None
+
+    def approve_waiting_with_total(
+        self,
+        rental_id: int,
+        total: int,
+        approval_status: str = "approved_manual",
+    ) -> Rental | None:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE rentals
+                SET total = ?, approval_status = ?
+                WHERE id = ?
+                    AND approval_status IN ('pending', 'resubmitted')
+                """,
+                (total, approval_status, rental_id),
+            )
+            conn.commit()
+            return self.get_by_id(rental_id) if cursor.rowcount else None
+
     def set_approval_status(self, rental_id: int, approval_status: str) -> Rental | None:
         with self.connect() as conn:
             conn.execute("UPDATE rentals SET approval_status = ? WHERE id = ?", (approval_status, rental_id))
             conn.commit()
             return self.get_by_id(rental_id)
+
+    def approve_waiting_as_test_drive(self, rental_id: int) -> Rental | None:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE rentals
+                SET days = 0, rate = 0, total = 0, condition_status = 'test_drive',
+                    approval_status = 'test_drive', status = 'returned', paid = 1,
+                    returned_at = COALESCE(returned_at, created_at)
+                WHERE id = ?
+                    AND approval_status IN ('pending', 'resubmitted')
+                """,
+                (rental_id,),
+            )
+            conn.commit()
+            return self.get_by_id(rental_id) if cursor.rowcount else None
 
     def set_test_drive_status(self, rental_id: int, is_test_drive: bool, rate: int | None, total: int) -> Rental | None:
         with self.connect() as conn:
@@ -438,6 +510,19 @@ class Storage:
             ).fetchall()
             return [_rental(row) for row in rows]
 
+    def pending_approval_older_than(self, cutoff_iso: str) -> list[Rental]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM rentals
+                WHERE approval_status IN ('pending', 'resubmitted')
+                    AND created_at <= ?
+                ORDER BY created_at, id
+                """,
+                (cutoff_iso,),
+            ).fetchall()
+            return [_rental(row) for row in rows]
+
     def monthly_report_rows(self, year_month: str, employee_query: str | None = None) -> list[sqlite3.Row]:
         with self.connect() as conn:
             params: list[str] = [year_month]
@@ -455,7 +540,7 @@ class Storage:
             return conn.execute(
                 f"""
                 SELECT
-                    rental_no, rental_month, employee_name, username, user_id, model, plate, days, return_text, planned_return_at,
+                    rental_no, rental_month, employee_name, username, user_id, model, plate, return_plate, days, return_text, planned_return_at,
                     take_comment, return_comment,
                     condition_status, rate, total, approval_status, paid, created_at, returned_at,
                     photo_count_take, photo_count_return
@@ -519,10 +604,34 @@ class Storage:
     def mark_paid_by_return_message(self, chat_id: int, return_message_id: int) -> bool:
         with self.connect() as conn:
             cursor = conn.execute(
-                "UPDATE rentals SET paid = 1 WHERE chat_id = ? AND return_message_id = ?",
-                (chat_id, return_message_id),
+                """
+                UPDATE rentals
+                SET paid = 1
+                WHERE (chat_id = ? AND return_message_id = ?)
+                    OR (return_work_chat_id = ? AND return_work_message_id = ?)
+                """,
+                (chat_id, return_message_id, chat_id, return_message_id),
             )
-            return cursor.rowcount > 0
+            if cursor.rowcount > 0:
+                return True
+            rows = conn.execute(
+                """
+                SELECT rentals.id, settings.value
+                FROM rentals
+                JOIN settings ON settings.key = 'return_work_message_ids:' || rentals.id
+                WHERE rentals.return_work_chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchall()
+            for row in rows:
+                try:
+                    message_ids = json.loads(row["value"])
+                except json.JSONDecodeError:
+                    continue
+                if return_message_id in {int(item) for item in message_ids}:
+                    conn.execute("UPDATE rentals SET paid = 1 WHERE id = ?", (row["id"],))
+                    return True
+            return False
 
     def get_by_take_message(self, chat_id: int, message_id: int) -> Rental | None:
         with self.connect() as conn:
@@ -578,6 +687,7 @@ def _rental(row: sqlite3.Row) -> Rental:
         employee_name=row["employee_name"],
         model=row["model"],
         plate=row["plate"],
+        return_plate=row["return_plate"],
         days=row["days"],
         planned_return_at=row["planned_return_at"],
         return_text=row["return_text"],

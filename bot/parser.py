@@ -6,7 +6,7 @@ import re
 
 TAKE_RE = re.compile(
     r"^\s*взял\s+(?P<model>.+?)\s+(?P<plate>[АВЕКМНОРСТУХABEKMHOPCTYX]\s?\d{3}\s?[АВЕКМНОРСТУХABEKMHOPCTYX]{2}\s?\d{2,3})"
-    r"\s+на\s+(?P<days>\d+)\s+д(?:ень|ня|ней|н[яе])"
+    r"(?:\s+на\s+(?P<days>\d+)\s+д(?:ень|ня|ней|н[яе]))?"
     r"(?P<night>.*?ночн(?:ая|ую)\s+смен[ау])?"
     r".*?возврат\s+(?P<return_text>.+?)\s*$",
     re.IGNORECASE | re.DOTALL,
@@ -28,6 +28,7 @@ LATIN_TO_CYRILLIC_PLATE = str.maketrans(
         "X": "Х",
     }
 )
+PLATE_RE = re.compile(r"^[АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2}\d{2,3}$")
 
 RETURN_RE = re.compile(
     r"^\s*(?:вернул|сдал)\s+(?:(?P<model>.+?)\s+)?(?P<plate>[АВЕКМНОРСТУХABEKMHOPCTYX]\s?\d{3}\s?[АВЕКМНОРСТУХABEKMHOPCTYX]{2}\s?\d{2,3})"
@@ -75,6 +76,10 @@ def normalize_plate(plate: str) -> str:
     return re.sub(r"\s+", "", plate).upper().translate(LATIN_TO_CYRILLIC_PLATE)
 
 
+def is_valid_plate(plate: str) -> bool:
+    return bool(PLATE_RE.fullmatch(normalize_plate(plate or "")))
+
+
 def normalize_model(model: str) -> str:
     return re.sub(r"\s+", " ", model).strip().upper()
 
@@ -86,7 +91,7 @@ def parse_take(text: str) -> TakeRequest | None:
     return TakeRequest(
         model=normalize_model(match.group("model")),
         plate=normalize_plate(match.group("plate")),
-        days=int(match.group("days")),
+        days=int(match.group("days") or 1),
         return_text=match.group("return_text").strip(),
         is_night_shift=bool(match.group("night")),
     )

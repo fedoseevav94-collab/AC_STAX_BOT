@@ -44,13 +44,13 @@ REPORT_USERNAMES=Fedos_AV,D_u_a
 FREE_MODELS=JAC J7:10
 DRIVER_RATES=JAC J7:2400
 EXEMPT_USERNAMES=hussein,sasha_f
-DB_PATH=/tmp/car_rental_bot.sqlite3
+DB_PATH=/app/data/car_rental_bot.sqlite3
 MEDIA_GROUP_WAIT_SECONDS=3
 ```
 
 `BOT_TOKEN` вставляется только в Koyeb, не в GitHub.
 
-Важно: `/tmp/car_rental_bot.sqlite3` подходит для первого запуска. Если нужно, чтобы история аренд гарантированно сохранялась между пересозданиями сервиса, подключите постоянное хранилище Koyeb Volume и укажите `DB_PATH` внутри него.
+Важно: база должна лежать в постоянном хранилище. Не используйте `/tmp`, иначе история аренд и отчеты могут пропасть после перезапуска или пересоздания сервиса. Если хостинг пересоздает контейнер, подключите постоянный Volume и укажите `DB_PATH` внутри него.
 
 ## 5. Запустить сервис
 

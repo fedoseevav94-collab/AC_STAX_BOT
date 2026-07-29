@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from bot.dates import parse_return_plan
-from bot.parser import parse_approval, parse_return, parse_take
+from bot.parser import is_valid_plate, parse_approval, parse_return, parse_take
 
 
 def test_parse_take_regular():
@@ -19,6 +19,15 @@ def test_parse_take_night_shift():
     assert result is not None
     assert result.is_night_shift is True
     assert result.return_text == "завтра"
+
+
+def test_parse_take_without_days():
+    result = parse_take("Взял KIA K5 Т339ВТ159, возврат завтра 18:30")
+    assert result is not None
+    assert result.model == "KIA K5"
+    assert result.plate == "Т339ВТ159"
+    assert result.days == 1
+    assert result.return_text == "завтра 18:30"
 
 
 def test_parse_return():
@@ -51,6 +60,14 @@ def test_parse_free_approval():
     assert result is not None
     assert result.is_free is True
     assert result.status == "СОВ"
+
+
+def test_valid_plate_accepts_latin_lookalike_letters():
+    assert is_valid_plate("T339BT159") is True
+
+
+def test_valid_plate_rejects_text_with_plate_inside():
+    assert is_valid_plate("машина T339BT159") is False
 
 
 def test_parse_return_plan_tomorrow():

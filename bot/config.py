@@ -49,7 +49,7 @@ def load_config() -> Config:
         exempt_usernames=_csv(os.getenv("EXEMPT_USERNAMES", "")),
         free_models=_mapping(os.getenv("FREE_MODELS", "JAC J7:10")),
         driver_rates=_mapping(os.getenv("DRIVER_RATES", "JAC J7:2400")),
-        db_path=os.getenv("DB_PATH", "car_rental_bot.sqlite3"),
+        db_path=os.getenv("DB_PATH", "data/car_rental_bot.sqlite3"),
         work_chat_id=int(raw_work_chat_id) if raw_work_chat_id else None,
         media_group_wait_seconds=int(os.getenv("MEDIA_GROUP_WAIT_SECONDS", "3")),
     )

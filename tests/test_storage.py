@@ -1,6 +1,13 @@
 from bot.storage import Storage
 
 
+def test_storage_creates_database_directory(tmp_path):
+    db_path = tmp_path / "nested" / "data" / "bot.sqlite3"
+    Storage(str(db_path))
+
+    assert db_path.exists()
+
+
 def test_return_lookup_ignores_chat_and_normalizes_plate(tmp_path):
     db_path = tmp_path / "bot.sqlite3"
     storage = Storage(str(db_path))
@@ -115,7 +122,134 @@ def test_return_plate_can_be_corrected(tmp_path):
         employee_name="Иван Иванов",
     )
 
-    rental = storage.update_plate(rental_id, "T339BT159")
+    rental = storage.update_return_plate(rental_id, "T339BT159")
 
     assert rental is not None
-    assert rental.plate == "Т339ВТ159"
+    assert rental.plate == "Е899СМ761"
+    assert rental.return_plate == "Т339ВТ159"
+
+
+def test_paid_can_be_marked_by_any_return_work_album_message(tmp_path):
+    db_path = tmp_path / "bot.sqlite3"
+    storage = Storage(str(db_path))
+    rental_id = storage.create_take(
+        chat_id=111,
+        message_id=2,
+        user_id=777,
+        username="driver",
+        employee_name="Иван Иванов",
+        model="KIA K5",
+        plate="Т339ВТ159",
+        days=1,
+        return_text="завтра",
+        planned_return_at="2026-07-22T10:00",
+        night_shift=False,
+        photo_count=5,
+        total=1700,
+        created_at="2026-07-21T10:00:00",
+    )
+    storage.set_approval_status(rental_id, "approved")
+    storage.mark_returned(
+        chat_id=777,
+        message_id=30,
+        plate="Т339ВТ159",
+        photo_count=5,
+        return_comment="Машина полностью исправна",
+        condition_status="ok",
+        user_id=777,
+        username="driver",
+        employee_name="Иван Иванов",
+    )
+    storage.update_return_work_message(rental_id, chat_id=-100, message_id=501, message_ids=[501, 502, 503, 504, 505])
+
+    assert storage.mark_paid_by_return_message(-100, 504) is True
+    assert storage.get_by_id(rental_id).paid is True
+
+
+def test_waiting_approval_can_be_approved_only_once(tmp_path):
+    db_path = tmp_path / "bot.sqlite3"
+    storage = Storage(str(db_path))
+    rental_id = storage.create_take(
+        chat_id=111,
+        message_id=2,
+        user_id=777,
+        username="driver",
+        employee_name="Иван Иванов",
+        model="KIA K5",
+        plate="Т339ВТ159",
+        days=1,
+        return_text="завтра",
+        planned_return_at="2026-07-22T10:00",
+        night_shift=False,
+        photo_count=5,
+        total=1700,
+        created_at="2026-07-21T10:00:00",
+    )
+
+    first = storage.approve_waiting(rental_id)
+    second = storage.approve_waiting(rental_id)
+
+    assert first is not None
+    assert first.approval_status == "approved"
+    assert second is None
+
+
+def test_pending_approval_older_than_returns_only_waiting_old_rows(tmp_path):
+    db_path = tmp_path / "bot.sqlite3"
+    storage = Storage(str(db_path))
+    old_id = storage.create_take(
+        chat_id=111,
+        message_id=2,
+        user_id=777,
+        username="driver",
+        employee_name="Иван Иванов",
+        model="KIA K5",
+        plate="Т339ВТ159",
+        days=1,
+        return_text="завтра",
+        planned_return_at="2026-07-22T10:00",
+        night_shift=False,
+        photo_count=5,
+        total=1700,
+        created_at="2026-07-21T10:00:00",
+    )
+    new_id = storage.create_take(
+        chat_id=111,
+        message_id=3,
+        user_id=888,
+        username="driver2",
+        employee_name="Петр Петров",
+        model="KIA K5",
+        plate="А111АА777",
+        days=1,
+        return_text="завтра",
+        planned_return_at="2026-07-22T10:00",
+        night_shift=False,
+        photo_count=5,
+        total=1700,
+        created_at="2026-07-21T10:20:00",
+    )
+    approved_id = storage.create_take(
+        chat_id=111,
+        message_id=4,
+        user_id=999,
+        username="driver3",
+        employee_name="Сидор Сидоров",
+        model="KIA K5",
+        plate="В222ВВ777",
+        days=1,
+        return_text="завтра",
+        planned_return_at="2026-07-22T10:00",
+        night_shift=False,
+        photo_count=5,
+        total=1700,
+        created_at="2026-07-21T10:00:00",
+    )
+    storage.set_approval_status(approved_id, "approved")
+
+    rows = storage.pending_approval_older_than("2026-07-21T10:15:00")
+
+    assert [row.id for row in rows] == [old_id]
+    assert storage.approve_waiting(old_id, "auto_approved").approval_status == "auto_approved"
+    assert storage.approve_waiting(old_id, "approved") is None
+    assert storage.get_by_id(new_id).approval_status == "pending"

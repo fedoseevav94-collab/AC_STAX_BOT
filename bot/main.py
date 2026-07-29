@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 from datetime import datetime, timedelta
 from io import BytesIO
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
@@ -13,6 +15,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BufferedInputFile, CallbackQuery, InputMediaPhoto, Message
+from aiogram.utils.backoff import BackoffConfig
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -32,14 +35,18 @@ from bot.keyboards import (
     start_menu,
     tariff_controls,
 )
-from bot.parser import normalize_plate, parse_approval, parse_return, parse_take
+from bot.parser import is_valid_plate, normalize_plate, parse_approval, parse_return, parse_take
 from bot.rules import check_take_rules, validate_approval
 from bot.storage import Storage
 
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 HELP_TEXT = """Форматы:
 
 Взял JAC J7 Н537РА126 на 2 дня, возврат 29 августа
+Взял KIA K5 Т339ВТ159, возврат завтра 18:30
 Взял JAC J7 Н537РА126 на 1 день, ночная смена, возврат завтра
 
 Возврат:
@@ -53,6 +60,9 @@ ADMIN_CONTROL_USERNAMES = {"fedos_av"}
 PENDING_APPROVAL_STATUSES = {"pending", "resubmitted"}
 REMINDER_BEFORE_RETURN = timedelta(hours=2)
 REMINDER_CHECK_INTERVAL_SECONDS = 300
+AUTO_APPROVAL_AFTER = timedelta(minutes=15)
+AUTO_APPROVAL_CHECK_INTERVAL_SECONDS = 60
+POLLING_BACKOFF = BackoffConfig(min_delay=2.0, max_delay=30.0, factor=1.5, jitter=0.2)
 DEFAULT_TARIFFS = {
     "comfort_day": 1700,
     "comfort_half": 900,
@@ -211,17 +221,21 @@ async def send_to_work_chat(bot: Bot, file_ids: list[str], summary: str) -> list
     work_chat_id = effective_work_chat_id()
     if work_chat_id is None:
         return []
-    if not file_ids:
-        message = await bot.send_message(chat_id=work_chat_id, text=summary)
-        return [message]
-    media = [
-        InputMediaPhoto(media=file_id, caption=summary if index == 0 else None)
-        for index, file_id in enumerate(file_ids)
-    ]
-    return await bot.send_media_group(chat_id=work_chat_id, media=media)
+    try:
+        if not file_ids:
+            message = await bot.send_message(chat_id=work_chat_id, text=summary)
+            return [message]
+        media = [
+            InputMediaPhoto(media=file_id, caption=summary if index == 0 else None)
+            for index, file_id in enumerate(file_ids)
+        ]
+        return await bot.send_media_group(chat_id=work_chat_id, media=media)
+    except Exception:
+        logger.exception("Failed to send message to work chat %s", work_chat_id)
+        return []
 
 
-async def publish_rental_to_work_chat(bot: Bot, rental) -> None:
+async def publish_rental_to_work_chat(bot: Bot, rental) -> bool:
     is_test_drive = is_test_drive_rental(rental)
     public_no = rental.rental_no or rental.id
     title = f"Тест драйв #{public_no}" if is_test_drive else f"Выдача #{public_no}"
@@ -230,7 +244,7 @@ async def publish_rental_to_work_chat(bot: Bot, rental) -> None:
         if is_test_drive
         else rental.take_comment
     )
-    await send_to_work_chat(
+    sent_messages = await send_to_work_chat(
         bot,
         storage.get_rental_photo_file_ids(rental.id),
         format_application(
@@ -248,6 +262,15 @@ async def publish_rental_to_work_chat(bot: Bot, rental) -> None:
             0 if is_test_drive else rental.total,
         ),
     )
+    return bool(sent_messages)
+
+
+def work_chat_delivery_text(sent_messages: list[Message]) -> str:
+    if sent_messages:
+        return "Фото отправлены в рабочий чат."
+    if effective_work_chat_id() is None:
+        return "Рабочий чат не задан, фото никуда не отправлены."
+    return "Не удалось отправить фото в рабочий чат. Проверьте настройки и логи бота."
 
 
 async def send_admin_approval_request(bot: Bot, rental, note: str = "Новая заявка на согласование.") -> bool:
@@ -290,7 +313,7 @@ async def send_admin_approval_request(bot: Bot, rental, note: str = "Новая 
             )
             sent = True
         except Exception:
-            pass
+            logger.exception("Failed to send approval request to admin %s for rental %s", admin_username, rental.id)
     return sent
 
 
@@ -412,13 +435,13 @@ def format_return_application(rental, comment: str | None = None, model: str | N
     full_name = rental.return_employee_name or rental.employee_name or "Без ФИО"
     user_name = rental.return_username or rental.username
     user_id = rental.return_user_id or rental.user_id
-    return format_application(
+    text = format_application(
         f"Сдача #{rental.rental_no or rental.id}",
         full_name,
         user_name,
         user_id,
         model or rental.model,
-        rental.plate,
+        rental.return_plate or rental.plate,
         rental.created_at,
         rental.planned_return_at,
         rental.return_text,
@@ -426,17 +449,25 @@ def format_return_application(rental, comment: str | None = None, model: str | N
         comment if comment is not None else rental.return_comment,
         rental.total,
     )
+    if rental.return_user_id and rental.return_user_id != rental.user_id:
+        text += "\n\nВнимание: авто сдал другой сотрудник."
+        text += f"\nВыдачу оформлял: {user_label(rental.employee_name or 'Без ФИО', rental.username, rental.user_id)}"
+        text += f"\nСдачу оформил: {user_label(full_name, user_name, user_id)}"
+    return text
 
 
 async def send_return_plate_correction_control(bot: Bot, rental) -> None:
     work_chat_id = effective_work_chat_id()
     if work_chat_id is None:
         return
-    await bot.send_message(
-        chat_id=work_chat_id,
-        text=f"Сдача #{rental.rental_no or rental.id}: если госномер указан неверно, ответственный за сдачу может исправить его.",
-        reply_markup=return_plate_correction_controls(rental.id),
-    )
+    try:
+        await bot.send_message(
+            chat_id=work_chat_id,
+            text=f"Сдача #{rental.rental_no or rental.id}: если госномер указан неверно, ответственный за сдачу может исправить его.",
+            reply_markup=return_plate_correction_controls(rental.id),
+        )
+    except Exception:
+        logger.exception("Failed to send return plate correction control for rental %s", rental.id)
 
 
 def active_rental_line(rental, now: datetime | None = None) -> str:
@@ -481,14 +512,30 @@ async def process_messages(messages: list[Message]) -> None:
 
     take = parse_take(text)
     if take:
+        if text_message.from_user is None:
+            await text_message.reply("Не могу оформить выдачу без Telegram-пользователя. Напишите боту обычным аккаунтом.")
+            return
         if photos < 5:
             await text_message.reply(
                 f"Для выдачи нужно 5 фото: 4 стороны авто и приборная панель с топливом. Сейчас вижу: {photos}. "
                 "Заявку не фиксирую, пришлите полный комплект через /car."
             )
             return
-        check = check_take_rules(config, take, username(text_message))
-        rate, total = rental_price(take.model, take.days, None)
+        started_at = now_moscow()
+        plan = parse_return_plan(take.return_text, now=started_at)
+        if plan is None:
+            await text_message.reply(
+                "Не понял дату возврата. Напишите, например: завтра 18:30, 29 августа 20:00 или 29.08.2026 12:00."
+            )
+            return
+        started_at_text = started_at.isoformat(timespec="seconds")
+        check = check_take_rules(config, replace(take, days=plan.days), username(text_message))
+        rate, total = rental_price(
+            take.model,
+            plan.days,
+            plan.planned_at.isoformat(timespec="seconds"),
+            started_at_text,
+        )
         rental_id = storage.create_take(
             chat_id=text_message.chat.id,
             message_id=text_message.message_id,
@@ -497,19 +544,20 @@ async def process_messages(messages: list[Message]) -> None:
             employee_name=employee_name(text_message),
             model=take.model,
             plate=take.plate,
-            days=take.days,
-            return_text=take.return_text,
-            planned_return_at=None,
+            days=plan.days,
+            return_text=plan.text,
+            planned_return_at=plan.planned_at.isoformat(timespec="seconds"),
             night_shift=take.is_night_shift,
             photo_count=photos,
             take_comment=None,
             rate=rate,
             total=total,
+            created_at=started_at_text,
         )
         rental = storage.get_by_id(rental_id)
         storage.set_rental_photo_file_ids(rental_id, photo_file_ids(messages))
         public_no = rental.rental_no if rental and rental.rental_no else rental_id
-        notes = [f"Зафиксировал выдачу #{public_no}: {take.model} {take.plate}, {take.days} дн., сумма {total} руб."]
+        notes = [f"Зафиксировал выдачу #{public_no}: {take.model} {take.plate}, {plan.days} дн., сумма {total} руб."]
         if not check.allowed:
             notes.append("По правилам выдача не проходит: " + " ".join(check.warnings))
         elif check.warnings:
@@ -556,20 +604,32 @@ async def process_messages(messages: list[Message]) -> None:
         model = returned.model or rental.model
         days = returned.days or rental.days
         notes = [f"Зафиксировал возврат: {model} {returned.plate}, аренда {days} дн., сумма {rental.total or 0} руб."]
-        notes.append("Фото отправлены в рабочий чат." if effective_work_chat_id() else "Рабочий чат не задан, фото никуда не отправлены.")
         sent_messages = await send_to_work_chat(
             text_message.bot,
             photo_file_ids(messages),
             format_return_application(rental, comment=returned.comment, model=model, days=days),
         )
+        notes.append(work_chat_delivery_text(sent_messages))
         if sent_messages:
-            storage.update_return_work_message(rental.id, sent_messages[0].chat.id, sent_messages[0].message_id)
+            storage.update_return_work_message(
+                rental.id,
+                sent_messages[0].chat.id,
+                sent_messages[0].message_id,
+                [sent.message_id for sent in sent_messages],
+            )
             rental = storage.get_by_id(rental.id) or rental
         await send_return_plate_correction_control(text_message.bot, rental)
         if rental.total and rental.total > 0:
             notes.append("После списания аренды отправьте /paid ответом на сообщение возврата.")
         summary = await text_message.reply("\n".join(notes))
         storage.update_return_message_id(rental.id, summary.message_id)
+        return
+
+    normalized_text = text.strip().lower()
+    if normalized_text.startswith(("взял", "сдал", "вернул")):
+        await text_message.reply(
+            "Не понял госномер. Напишите номер в формате А123ВС77 или А123ВС777, например: Н537РА126."
+        )
 
 
 async def flush_media_group(media_group_id: str) -> None:
@@ -911,13 +971,14 @@ async def admin_approve_rental(callback: CallbackQuery) -> None:
     if not is_rental_waiting_approval(current_rental):
         await callback.answer("Эта заявка уже обработана", show_alert=True)
         return
-    rental = storage.set_approval_status(rental_id, "approved")
+    rental = storage.approve_waiting(rental_id, "approved")
     if rental is None:
-        await callback.answer("Заявка не найдена", show_alert=True)
+        await callback.answer("Эта заявка уже обработана", show_alert=True)
         return
-    await publish_rental_to_work_chat(callback.message.bot, rental)
+    sent_to_work_chat = await publish_rental_to_work_chat(callback.message.bot, rental)
     await callback.message.edit_text(
-        f"Заявка #{rental.rental_no or rental.id} одобрена и отправлена в рабочий чат.\n"
+        f"Заявка #{rental.rental_no or rental.id} одобрена"
+        f"{' и отправлена в рабочий чат' if sent_to_work_chat else ', но не отправлена в рабочий чат'}.\n"
         f"{rental.employee_name or 'Без ФИО'}: {rental.model} {rental.plate}\n"
         f"Сумма: {0 if is_test_drive_rental(rental) else (rental.total or 0)} руб."
     )
@@ -937,13 +998,14 @@ async def admin_approve_as_test_drive(callback: CallbackQuery) -> None:
     if not is_rental_waiting_approval(current_rental):
         await callback.answer("Эта заявка уже обработана", show_alert=True)
         return
-    rental = storage.set_test_drive_status(rental_id, is_test_drive=True, rate=0, total=0)
+    rental = storage.approve_waiting_as_test_drive(rental_id)
     if rental is None:
-        await callback.answer("Заявка не найдена", show_alert=True)
+        await callback.answer("Эта заявка уже обработана", show_alert=True)
         return
-    await publish_rental_to_work_chat(callback.message.bot, rental)
+    sent_to_work_chat = await publish_rental_to_work_chat(callback.message.bot, rental)
     await callback.message.edit_text(
-        f"Заявка #{rental.rental_no or rental.id} одобрена как тест-драйв и отправлена в рабочий чат.\n"
+        f"Заявка #{rental.rental_no or rental.id} одобрена как тест-драйв"
+        f"{' и отправлена в рабочий чат' if sent_to_work_chat else ', но не отправлена в рабочий чат'}.\n"
         f"{rental.employee_name or 'Без ФИО'}: {rental.model} {rental.plate}\n"
         "Сумма: 0 руб."
     )
@@ -992,15 +1054,15 @@ async def admin_set_amount_finish(message: Message, state: FSMContext) -> None:
         await message.answer("Эта заявка уже обработана. Повторно отправлять ее в рабочий чат не буду.")
         await state.clear()
         return
-    rental = storage.set_total(rental_id, int(raw_amount), approval_status="approved_manual")
+    rental = storage.approve_waiting_with_total(rental_id, int(raw_amount), approval_status="approved_manual")
     await state.clear()
     if rental is None:
-        await message.answer("Заявка не найдена.")
+        await message.answer("Эта заявка уже обработана. Повторно отправлять ее в рабочий чат не буду.")
         return
-    await publish_rental_to_work_chat(message.bot, rental)
+    sent_to_work_chat = await publish_rental_to_work_chat(message.bot, rental)
     await message.answer(
         f"Заявка #{rental.rental_no or rental.id} одобрена, сумма изменена на {rental.total or 0} руб. "
-        "Заявка отправлена в рабочий чат."
+        + ("Заявка отправлена в рабочий чат." if sent_to_work_chat else "Заявка не отправлена в рабочий чат, проверьте настройки и логи бота.")
     )
 
 
@@ -1033,6 +1095,7 @@ async def admin_reject_rental(callback: CallbackQuery) -> None:
         )
     except Exception:
         employee_notified = False
+        logger.exception("Failed to notify employee about rejected rental %s", rental.id)
     await callback.message.edit_text(
         f"Заявка #{rental.rental_no or rental.id} не одобрена.\n"
         f"{rental.employee_name or 'Без ФИО'}: {rental.model} {rental.plate}\n"
@@ -1113,6 +1176,10 @@ async def start_take(callback: CallbackQuery, state: FSMContext) -> None:
 
 @dp.message(ProfileFlow.name)
 async def save_profile_name(message: Message, state: FSMContext) -> None:
+    if message.from_user is None:
+        await message.answer("Не могу сохранить ФИО без Telegram-пользователя. Напишите боту обычным аккаунтом.")
+        await state.clear()
+        return
     full_name = " ".join((message.text or "").split())
     if len(full_name.split()) < 2:
         await message.answer("Пожалуйста, укажите ФИО полностью, например: Иванов Иван Иванович.")
@@ -1157,6 +1224,9 @@ async def take_model(message: Message, state: FSMContext) -> None:
 @dp.message(TakeFlow.plate)
 async def take_plate(message: Message, state: FSMContext) -> None:
     plate = normalize_plate(message.text or "")
+    if not is_valid_plate(plate):
+        await message.answer("Не понял госномер. Введите только номер, например: Н537РА126")
+        return
     await state.update_data(plate=plate)
     await state.set_state(TakeFlow.return_text)
     await message.answer("Когда возврат? Например: завтра 18:30, 29 августа 20:00, 29.08.2026 12:00.")
@@ -1234,6 +1304,10 @@ async def take_photos(message: Message, state: FSMContext) -> None:
     take = parse_take(fake_text)
     if take is None:
         await message.answer("Не смог собрать заявку. Начните заново через /car.")
+        await state.clear()
+        return
+    if message.from_user is None:
+        await message.answer("Не могу оформить выдачу без Telegram-пользователя. Напишите боту обычным аккаунтом.")
         await state.clear()
         return
 
@@ -1334,7 +1408,11 @@ async def test_drive_model(message: Message, state: FSMContext) -> None:
 
 @dp.message(TestDriveFlow.plate)
 async def test_drive_plate(message: Message, state: FSMContext) -> None:
-    await state.update_data(plate=normalize_plate(message.text or ""))
+    plate = normalize_plate(message.text or "")
+    if not is_valid_plate(plate):
+        await message.answer("Не понял госномер. Введите только номер, например: Н537РА126")
+        return
+    await state.update_data(plate=plate)
     await state.set_state(TestDriveFlow.comment)
     await message.answer("Напишите, с кем согласован тест драйв. Это обязательный комментарий.")
 
@@ -1374,6 +1452,10 @@ async def test_drive_photos(message: Message, state: FSMContext) -> None:
     if count < 5:
         await message.answer(f"Фото принято: {count}/5.")
         return
+    if message.from_user is None:
+        await message.answer("Не могу оформить тест драйв без Telegram-пользователя. Напишите боту обычным аккаунтом.")
+        await state.clear()
+        return
 
     data = await state.get_data()
     rental_id = storage.create_test_drive(
@@ -1410,7 +1492,11 @@ async def test_drive_photos_wrong(message: Message) -> None:
 
 @dp.message(ReturnFlow.plate)
 async def return_plate(message: Message, state: FSMContext) -> None:
-    await state.update_data(plate=normalize_plate(message.text or ""))
+    plate = normalize_plate(message.text or "")
+    if not is_valid_plate(plate):
+        await message.answer("Не понял госномер. Введите только номер, например: Н537РА126")
+        return
+    await state.update_data(plate=plate)
     await state.set_state(ReturnFlow.condition)
     await message.answer("Опишите недостатки машины или нажмите кнопку:", reply_markup=condition_menu())
 
@@ -1476,14 +1562,19 @@ async def return_photos(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
     notes = [f"Возврат зафиксирован: {rental.model} {rental.plate}, сумма {rental.total or 0} руб."]
-    notes.append("Фото отправлены в рабочий чат." if effective_work_chat_id() else "Рабочий чат не задан, фото никуда не отправлены.")
     sent_messages = await send_to_work_chat(
         message.bot,
         list(data.get("photo_file_ids", [])),
         format_return_application(rental, comment=data.get("return_comment")),
     )
+    notes.append(work_chat_delivery_text(sent_messages))
     if sent_messages:
-        storage.update_return_work_message(rental.id, sent_messages[0].chat.id, sent_messages[0].message_id)
+        storage.update_return_work_message(
+            rental.id,
+            sent_messages[0].chat.id,
+            sent_messages[0].message_id,
+            [sent.message_id for sent in sent_messages],
+        )
         rental = storage.get_by_id(rental.id) or rental
     await send_return_plate_correction_control(message.bot, rental)
     if rental.total and rental.total > 0:
@@ -1534,10 +1625,10 @@ async def return_change_plate_finish(message: Message, state: FSMContext) -> Non
         await state.clear()
         return
     new_plate = normalize_plate(message.text or "")
-    if not new_plate:
+    if not is_valid_plate(new_plate):
         await message.answer("Не понял номер. Введите госномер, например: Т339ВТ159")
         return
-    rental = storage.update_plate(rental_id, new_plate)
+    rental = storage.update_return_plate(rental_id, new_plate)
     await state.clear()
     if rental is None:
         await message.answer("Сдача не найдена.")
@@ -1559,7 +1650,7 @@ async def return_change_plate_finish(message: Message, state: FSMContext) -> Non
                     text=updated_summary,
                 )
             except Exception:
-                pass
+                logger.exception("Failed to edit return work message after plate correction for rental %s", rental.id)
 
     control_chat_id = data.get("correction_control_chat_id")
     control_message_id = data.get("correction_control_message_id")
@@ -1568,11 +1659,13 @@ async def return_change_plate_finish(message: Message, state: FSMContext) -> Non
             await message.bot.edit_message_text(
                 chat_id=control_chat_id,
                 message_id=control_message_id,
-                text=f"Сдача #{rental.rental_no or rental.id}: госномер изменен на {rental.plate}.",
+                text=f"Сдача #{rental.rental_no or rental.id}: госномер сдачи изменен на {rental.return_plate or rental.plate}.",
             )
         except Exception:
-            pass
-    await message.answer(f"Госномер в сдаче #{rental.rental_no or rental.id} изменен на {rental.plate}.")
+            logger.exception("Failed to edit return plate correction control for rental %s", rental.id)
+    await message.answer(
+        f"Госномер в сдаче #{rental.rental_no or rental.id} изменен на {rental.return_plate or rental.plate}."
+    )
 
 
 @dp.message(F.reply_to_message)
@@ -1625,7 +1718,7 @@ async def notify_admins(bot: Bot, text: str) -> None:
         try:
             await bot.send_message(chat_id=int(admin_user_id), text=text)
         except Exception:
-            pass
+            logger.exception("Failed to notify admin %s", admin_username)
 
 
 async def send_return_reminder(bot: Bot, rental) -> None:
@@ -1639,7 +1732,7 @@ async def send_return_reminder(bot: Bot, rental) -> None:
             ),
         )
     except Exception:
-        pass
+        logger.exception("Failed to send return reminder for rental %s", rental.id)
 
 
 async def send_overdue_notice(bot: Bot, rental) -> None:
@@ -1653,8 +1746,49 @@ async def send_overdue_notice(bot: Bot, rental) -> None:
     try:
         await bot.send_message(chat_id=rental.user_id, text=text)
     except Exception:
-        pass
+        logger.exception("Failed to send overdue notice to employee for rental %s", rental.id)
     await notify_admins(bot, text)
+
+
+async def notify_employee_auto_approved(bot: Bot, rental, sent_to_work_chat: bool) -> None:
+    try:
+        await bot.send_message(
+            chat_id=rental.user_id,
+            text=(
+                f"Заявка #{rental.rental_no or rental.id} автоматически одобрена, так как 15 минут не было решения админа.\n"
+                + (
+                    "Заявка отправлена в рабочий чат."
+                    if sent_to_work_chat
+                    else "Но заявку не удалось отправить в рабочий чат, ответственный увидит ошибку в логах."
+                )
+            ),
+        )
+    except Exception:
+        logger.exception("Failed to notify employee about auto approved rental %s", rental.id)
+
+
+async def auto_approval_loop(bot: Bot) -> None:
+    while True:
+        try:
+            cutoff = (now_moscow() - AUTO_APPROVAL_AFTER).isoformat(timespec="seconds")
+            for waiting_rental in storage.pending_approval_older_than(cutoff):
+                if is_test_drive_rental(waiting_rental):
+                    rental = storage.approve_waiting_as_test_drive(waiting_rental.id)
+                else:
+                    rental = storage.approve_waiting(waiting_rental.id, "auto_approved")
+                if rental is None:
+                    continue
+                sent_to_work_chat = await publish_rental_to_work_chat(bot, rental)
+                logger.info(
+                    "Rental %s auto approved after %s minutes. sent_to_work_chat=%s",
+                    rental.id,
+                    int(AUTO_APPROVAL_AFTER.total_seconds() // 60),
+                    sent_to_work_chat,
+                )
+                await notify_employee_auto_approved(bot, rental, sent_to_work_chat)
+        except Exception:
+            logger.exception("Auto approval loop failed")
+        await asyncio.sleep(AUTO_APPROVAL_CHECK_INTERVAL_SECONDS)
 
 
 async def return_control_loop(bot: Bot) -> None:
@@ -1678,23 +1812,31 @@ async def return_control_loop(bot: Bot) -> None:
                     await send_overdue_notice(bot, rental)
                     storage.set_setting(overdue_key, now_moscow().isoformat(timespec="seconds"))
         except Exception:
-            pass
+            logger.exception("Return control loop failed")
         await asyncio.sleep(REMINDER_CHECK_INTERVAL_SECONDS)
 
 
 async def main() -> None:
     bot = Bot(token=config.bot_token)
+    logger.info("Starting AC STAX bot. db_path=%s work_chat_id=%s", config.db_path, effective_work_chat_id())
     await bot.set_my_commands(
         [
             BotCommand(command="start", description="Открыть меню"),
             BotCommand(command="help", description="Показать инструкцию"),
         ]
     )
+    await bot.delete_webhook(drop_pending_updates=False)
     return_control_task = asyncio.create_task(return_control_loop(bot))
+    auto_approval_task = asyncio.create_task(auto_approval_loop(bot))
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, backoff_config=POLLING_BACKOFF)
     finally:
-        return_control_task.cancel()
+        logger.info("Stopping AC STAX bot")
+        for task in (return_control_task, auto_approval_task):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await bot.session.close()
 
 
 if __name__ == "__main__":
