@@ -30,12 +30,16 @@ def test_return_lookup_ignores_chat_and_normalizes_plate(tmp_path):
         return_comment="Машина полностью исправна",
         condition_status="ok",
         user_id=777,
+        username="driver",
+        employee_name="Иван Иванов",
     )
 
     assert rental is not None
     assert rental.id == rental_id
     assert rental.status == "returned"
     assert rental.return_user_id == 777
+    assert rental.return_username == "driver"
+    assert rental.return_employee_name == "Иван Иванов"
 
 
 def test_return_lookup_allows_another_employee_for_unique_plate(tmp_path):
@@ -67,12 +71,16 @@ def test_return_lookup_allows_another_employee_for_unique_plate(tmp_path):
         return_comment="Машина полностью исправна",
         condition_status="ok",
         user_id=888,
+        username="manager",
+        employee_name="Александр Михно",
     )
 
     assert rental is not None
     assert rental.id == rental_id
     assert rental.status == "returned"
     assert rental.return_user_id == 888
+    assert rental.return_username == "manager"
+    assert rental.return_employee_name == "Александр Михно"
 
 
 def test_return_plate_can_be_corrected(tmp_path):
@@ -103,6 +111,8 @@ def test_return_plate_can_be_corrected(tmp_path):
         return_comment="Машина полностью исправна",
         condition_status="ok",
         user_id=777,
+        username="driver",
+        employee_name="Иван Иванов",
     )
 
     rental = storage.update_plate(rental_id, "T339BT159")

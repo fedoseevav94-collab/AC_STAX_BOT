@@ -409,11 +409,14 @@ def format_application(
 
 
 def format_return_application(rental, comment: str | None = None, model: str | None = None, days: int | None = None) -> str:
+    full_name = rental.return_employee_name or rental.employee_name or "Без ФИО"
+    user_name = rental.return_username or rental.username
+    user_id = rental.return_user_id or rental.user_id
     return format_application(
         f"Сдача #{rental.rental_no or rental.id}",
-        rental.employee_name or "Без ФИО",
-        rental.username,
-        rental.user_id,
+        full_name,
+        user_name,
+        user_id,
         model or rental.model,
         rental.plate,
         rental.created_at,
@@ -544,6 +547,8 @@ async def process_messages(messages: list[Message]) -> None:
             return_comment=returned.comment or None,
             condition_status="comment" if returned.comment else None,
             user_id=text_message.from_user.id if text_message.from_user else None,
+            username=username(text_message),
+            employee_name=employee_name(text_message),
         )
         if rental is None:
             await text_message.reply("Не нашел активную выдачу по этому номеру. Проверьте номер или формат.")
@@ -1463,6 +1468,8 @@ async def return_photos(message: Message, state: FSMContext) -> None:
         return_comment=data.get("return_comment"),
         condition_status=data.get("condition_status"),
         user_id=message.from_user.id if message.from_user else None,
+        username=username(message),
+        employee_name=employee_name(message),
     )
     if rental is None:
         await message.answer("Не нашел активную выдачу по этому номеру. Проверьте номер или обратитесь к ответственному.")

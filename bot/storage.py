@@ -62,6 +62,8 @@ class Rental:
     returned_at: str | None
     approval_status: str | None
     return_user_id: int | None
+    return_username: str | None
+    return_employee_name: str | None
     return_work_chat_id: int | None
     return_work_message_id: int | None
 
@@ -136,6 +138,8 @@ class Storage:
             "rental_no": "ALTER TABLE rentals ADD COLUMN rental_no INTEGER",
             "rental_month": "ALTER TABLE rentals ADD COLUMN rental_month TEXT",
             "return_user_id": "ALTER TABLE rentals ADD COLUMN return_user_id INTEGER",
+            "return_username": "ALTER TABLE rentals ADD COLUMN return_username TEXT",
+            "return_employee_name": "ALTER TABLE rentals ADD COLUMN return_employee_name TEXT",
             "return_work_chat_id": "ALTER TABLE rentals ADD COLUMN return_work_chat_id INTEGER",
             "return_work_message_id": "ALTER TABLE rentals ADD COLUMN return_work_message_id INTEGER",
         }.items():
@@ -289,6 +293,8 @@ class Storage:
         return_comment: str | None = None,
         condition_status: str | None = None,
         user_id: int | None = None,
+        username: str | None = None,
+        employee_name: str | None = None,
     ) -> Rental | None:
         with self.connect() as conn:
             params: list[int] = []
@@ -328,7 +334,8 @@ class Storage:
                 """
                 UPDATE rentals
                 SET return_message_id = ?, photo_count_return = ?, return_comment = ?,
-                    condition_status = ?, return_user_id = ?, status = 'returned', returned_at = ?
+                    condition_status = ?, return_user_id = ?, return_username = ?,
+                    return_employee_name = ?, status = 'returned', returned_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -337,6 +344,8 @@ class Storage:
                     return_comment,
                     condition_status,
                     user_id,
+                    username,
+                    employee_name,
                     now_moscow_iso(),
                     row["id"],
                 ),
@@ -583,6 +592,8 @@ def _rental(row: sqlite3.Row) -> Rental:
         returned_at=row["returned_at"],
         approval_status=row["approval_status"],
         return_user_id=row["return_user_id"],
+        return_username=row["return_username"],
+        return_employee_name=row["return_employee_name"],
         return_work_chat_id=row["return_work_chat_id"],
         return_work_message_id=row["return_work_message_id"],
     )
