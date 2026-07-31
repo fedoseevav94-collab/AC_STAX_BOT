@@ -239,15 +239,14 @@ class Storage:
                     user_id, username, employee_name, model, plate, days, return_text,
                     planned_return_at, night_shift, photo_count_take, photo_count_return,
                     take_comment, return_comment, condition_status, rate, total, approval_status,
-                    status, paid, created_at, returned_at
+                    status, paid, created_at, returned_at, return_user_id, return_username, return_employee_name
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', NULL, 0, ?, ?, ?, ?, 'test_drive', 0, 0, 'pending', 'returned', 1, ?, ?)
+                VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, '', NULL, 0, ?, 0, ?, ?, 'test_drive', 0, 0, 'pending', 'taken', 1, ?, NULL, NULL, NULL, NULL)
                 """,
                 (
                     rental_no,
                     rental_month,
                     chat_id,
-                    message_id,
                     message_id,
                     user_id,
                     username,
@@ -255,10 +254,8 @@ class Storage:
                     model,
                     plate,
                     photo_count,
-                    photo_count,
                     f"Тест драйв. Согласовано: {comment}",
                     comment,
-                    created_at,
                     created_at,
                 ),
             )
@@ -526,8 +523,7 @@ class Storage:
                 """
                 UPDATE rentals
                 SET days = 0, rate = 0, total = 0, condition_status = 'test_drive',
-                    approval_status = 'test_drive', status = 'returned', paid = 1,
-                    returned_at = COALESCE(returned_at, created_at)
+                    approval_status = 'test_drive', paid = 1
                 WHERE id = ?
                     AND approval_status IN ('pending', 'resubmitted')
                 """,
@@ -543,8 +539,7 @@ class Storage:
                     """
                     UPDATE rentals
                     SET days = 0, rate = 0, total = 0, condition_status = 'test_drive',
-                        approval_status = 'test_drive', status = 'returned', paid = 1,
-                        returned_at = COALESCE(returned_at, created_at)
+                        approval_status = 'test_drive', paid = 1
                     WHERE id = ?
                     """,
                     (rental_id,),

@@ -423,6 +423,19 @@ def actor_label(full_name: str | None, user_name: str | None, user_id: int | Non
 
 
 def returned_rental_details(plate: str, rental) -> str:
+    if is_test_drive_rental(rental):
+        closer_name = rental.return_employee_name or rental.employee_name
+        closer_username = rental.return_username or rental.username
+        closer_user_id = rental.return_user_id or rental.user_id
+        return "\n".join(
+            [
+                f"По номеру {plate} последняя запись уже закрыта как тест-драйв.",
+                f"Тест-драйв #{rental.rental_no or rental.id} от {format_dt(rental.created_at)}.",
+                f"Оформлял: {actor_label(rental.employee_name, rental.username, rental.user_id)}.",
+                f"Закрыл тест-драйв: {actor_label(closer_name, closer_username, closer_user_id)}.",
+                "Если машину нужно сдать через сценарий сдачи, сначала нажмите в админ-меню `Восстановить выдачу`.",
+            ]
+        )
     return "\n".join(
         [
             f"По номеру {plate} последняя выдача уже отмечена как сданная.",

@@ -205,6 +205,15 @@ def test_restore_latest_returned_by_plate_reopens_test_drive(tmp_path):
         created_at="2026-07-30T18:42:00",
     )
     storage.approve_waiting_as_test_drive(rental_id)
+    with storage.connect() as conn:
+        conn.execute(
+            """
+            UPDATE rentals
+            SET status = 'returned', returned_at = created_at, paid = 1
+            WHERE id = ?
+            """,
+            (rental_id,),
+        )
 
     rental = storage.restore_latest_returned_by_plate("B820HY172")
 
@@ -216,6 +225,58 @@ def test_restore_latest_returned_by_plate_reopens_test_drive(tmp_path):
     assert rental.total == 0
     assert rental.returned_at is None
     assert rental.paid is False
+
+
+def test_create_test_drive_stays_active_until_return(tmp_path):
+    db_path = tmp_path / "bot.sqlite3"
+    storage = Storage(str(db_path))
+    rental_id = storage.create_test_drive(
+        chat_id=111,
+        message_id=2,
+        user_id=777,
+        username="kicket22",
+        employee_name="Михно Александр Васильевич",
+        model="HYUNDAI SOLARIS",
+        plate="В820НУ172",
+        photo_count=5,
+        comment="Согласовано: Александр Федосеев",
+        created_at="2026-07-30T18:42:00",
+    )
+
+    rental = storage.get_by_id(rental_id)
+
+    assert rental.status == "taken"
+    assert rental.returned_at is None
+    assert rental.return_user_id is None
+    assert rental.return_username is None
+    assert rental.return_employee_name is None
+    assert rental.total == 0
+    assert rental.days == 0
+
+
+def test_approving_test_drive_keeps_it_active(tmp_path):
+    db_path = tmp_path / "bot.sqlite3"
+    storage = Storage(str(db_path))
+    rental_id = storage.create_test_drive(
+        chat_id=111,
+        message_id=2,
+        user_id=777,
+        username="kicket22",
+        employee_name="Михно Александр Васильевич",
+        model="HYUNDAI SOLARIS",
+        plate="В820НУ172",
+        photo_count=5,
+        comment="Согласовано: Александр Федосеев",
+        created_at="2026-07-30T18:42:00",
+    )
+
+    rental = storage.approve_waiting_as_test_drive(rental_id)
+
+    assert rental.status == "taken"
+    assert rental.approval_status == "test_drive"
+    assert rental.returned_at is None
+    assert rental.total == 0
+    assert rental.days == 0
 
 
 def test_return_plate_can_be_corrected(tmp_path):
