@@ -403,7 +403,6 @@ class Storage:
                 """
                 SELECT * FROM rentals
                 WHERE status = 'returned'
-                    AND COALESCE(approval_status, 'approved') != 'test_drive'
                 ORDER BY returned_at DESC, id DESC
                 """
             ).fetchall()

@@ -189,6 +189,35 @@ def test_restore_latest_returned_by_plate_reopens_rental(tmp_path):
     assert rental.paid is False
 
 
+def test_restore_latest_returned_by_plate_reopens_test_drive(tmp_path):
+    db_path = tmp_path / "bot.sqlite3"
+    storage = Storage(str(db_path))
+    rental_id = storage.create_test_drive(
+        chat_id=111,
+        message_id=2,
+        user_id=777,
+        username="kicket22",
+        employee_name="Михно Александр Васильевич",
+        model="HYUNDAI SOLARIS",
+        plate="В820НУ172",
+        photo_count=5,
+        comment="Согласовано: Александр Федосеев",
+        created_at="2026-07-30T18:42:00",
+    )
+    storage.approve_waiting_as_test_drive(rental_id)
+
+    rental = storage.restore_latest_returned_by_plate("B820HY172")
+
+    assert rental is not None
+    assert rental.id == rental_id
+    assert rental.status == "taken"
+    assert rental.approval_status == "test_drive"
+    assert rental.days == 0
+    assert rental.total == 0
+    assert rental.returned_at is None
+    assert rental.paid is False
+
+
 def test_return_plate_can_be_corrected(tmp_path):
     db_path = tmp_path / "bot.sqlite3"
     storage = Storage(str(db_path))

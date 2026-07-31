@@ -591,10 +591,11 @@ def restore_rental_by_plate_text(plate_text: str) -> str:
         return "Не понял госномер. Введите номер в формате А123ВС77 или А123ВС777, например: В820НУ172."
     rental = storage.restore_latest_returned_by_plate(plate)
     if rental is None:
-        return f"По номеру {plate} не нашел закрытую аренду, которую можно восстановить."
+        return f"По номеру {plate} не нашел закрытую выдачу или тест-драйв, которые можно восстановить."
+    title = "Тест-драйв" if is_test_drive_rental(rental) else "Выдача"
     return "\n".join(
         [
-            f"Выдача #{rental.rental_no or rental.id} восстановлена в активные.",
+            f"{title} #{rental.rental_no or rental.id} восстановлен в активные.",
             f"Авто: {rental.model} {rental.plate}",
             f"Брал: {actor_label(rental.employee_name, rental.username, rental.user_id)}",
             f"Дата выдачи: {format_dt(rental.created_at)}",
