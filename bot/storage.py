@@ -510,6 +510,17 @@ class Storage:
             ).fetchall()
             return [_rental(row) for row in rows]
 
+    def rentals_by_plate(self, plate: str) -> list[Rental]:
+        normalized_plate = normalize_plate(plate)
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM rentals
+                ORDER BY id DESC
+                """
+            ).fetchall()
+            return [_rental(row) for row in rows if normalize_plate(row["plate"]) == normalized_plate]
+
     def pending_approval_older_than(self, cutoff_iso: str) -> list[Rental]:
         with self.connect() as conn:
             rows = conn.execute(

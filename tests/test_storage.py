@@ -90,6 +90,31 @@ def test_return_lookup_allows_another_employee_for_unique_plate(tmp_path):
     assert rental.return_employee_name == "Александр Михно"
 
 
+def test_rentals_by_plate_normalizes_latin_lookalike_letters(tmp_path):
+    db_path = tmp_path / "bot.sqlite3"
+    storage = Storage(str(db_path))
+    rental_id = storage.create_take(
+        chat_id=111,
+        message_id=2,
+        user_id=777,
+        username="driver",
+        employee_name="Александр Михно",
+        model="HYUNDAI SONATA",
+        plate="В820НУ172",
+        days=1,
+        return_text="завтра",
+        planned_return_at="2026-07-22T10:00",
+        night_shift=False,
+        photo_count=5,
+        total=1700,
+        created_at="2026-07-21T10:00:00",
+    )
+
+    rows = storage.rentals_by_plate("B820HY172")
+
+    assert [row.id for row in rows] == [rental_id]
+
+
 def test_return_plate_can_be_corrected(tmp_path):
     db_path = tmp_path / "bot.sqlite3"
     storage = Storage(str(db_path))

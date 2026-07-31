@@ -209,6 +209,40 @@ def is_rental_waiting_approval(rental) -> bool:
     return (rental.approval_status or "pending") in PENDING_APPROVAL_STATUSES
 
 
+def is_rental_returnable(rental) -> bool:
+    return rental.status == "taken" and not is_rental_waiting_approval(rental) and rental.approval_status not in {
+        "rejected",
+        "employee_cancelled",
+    }
+
+
+def return_plate_block_message(plate: str, rentals: list) -> str | None:
+    returnable = [rental for rental in rentals if is_rental_returnable(rental)]
+    if len(returnable) == 1:
+        return None
+    if len(returnable) > 1:
+        return (
+            f"По номеру {plate} найдено несколько активных выдач. "
+            "Обратитесь к ответственному, чтобы он проверил выдачи вручную."
+        )
+    if not rentals:
+        return f"По номеру {plate} не нашел выдачу. Проверьте номер или обратитесь к ответственному."
+
+    latest = rentals[0]
+    if latest.status == "returned":
+        return f"По номеру {plate} последняя выдача уже отмечена как сданная."
+    if is_rental_waiting_approval(latest):
+        return (
+            f"Выдача по номеру {plate} есть, но она еще ждет одобрения. "
+            "Сдать авто можно после одобрения или автоодобрения через 15 минут."
+        )
+    if latest.approval_status == "rejected":
+        return f"Заявка по номеру {plate} не одобрена. Обратитесь к ответственному."
+    if latest.approval_status == "employee_cancelled":
+        return f"Заявка по номеру {plate} отменена сотрудником. Обратитесь к ответственному."
+    return f"По номеру {plate} не нашел активную выдачу. Обратитесь к ответственному."
+
+
 def photo_count(messages: list[Message]) -> int:
     return sum(1 for message in messages if message.photo)
 
@@ -575,6 +609,10 @@ async def process_messages(messages: list[Message]) -> None:
 
     returned = parse_return(text)
     if returned:
+        block_message = return_plate_block_message(returned.plate, storage.rentals_by_plate(returned.plate))
+        if block_message:
+            await text_message.reply(block_message)
+            return
         if photos < 5:
             await text_message.reply(
                 f"Для возврата нужно 5 фото: 4 стороны авто и приборная панель с топливом. Сейчас вижу: {photos}. "
@@ -1495,6 +1533,10 @@ async def return_plate(message: Message, state: FSMContext) -> None:
     plate = normalize_plate(message.text or "")
     if not is_valid_plate(plate):
         await message.answer("Не понял госномер. Введите только номер, например: Н537РА126")
+        return
+    block_message = return_plate_block_message(plate, storage.rentals_by_plate(plate))
+    if block_message:
+        await message.answer(block_message)
         return
     await state.update_data(plate=plate)
     await state.set_state(ReturnFlow.condition)
