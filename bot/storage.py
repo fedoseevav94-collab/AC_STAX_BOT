@@ -361,6 +361,41 @@ class Storage:
             conn.commit()
             return self.get_by_id(row["id"])
 
+    def find_return_candidate(self, plate: str, user_id: int | None = None) -> Rental | None:
+        with self.connect() as conn:
+            params: list[int] = []
+            user_filter = ""
+            if user_id is not None:
+                user_filter = "AND user_id = ?"
+                params.append(user_id)
+            rows = conn.execute(
+                f"""
+                SELECT * FROM rentals
+                WHERE status = 'taken'
+                    AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
+                    {user_filter}
+                ORDER BY id DESC
+                """,
+                params,
+            ).fetchall()
+            normalized_plate = normalize_plate(plate)
+            row = next((candidate for candidate in rows if normalize_plate(candidate["plate"]) == normalized_plate), None)
+            if row is None and user_id is not None:
+                fallback_rows = conn.execute(
+                    """
+                    SELECT * FROM rentals
+                    WHERE status = 'taken'
+                        AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
+                    ORDER BY id DESC
+                    """
+                ).fetchall()
+                plate_matches = [
+                    candidate for candidate in fallback_rows if normalize_plate(candidate["plate"]) == normalized_plate
+                ]
+                if len(plate_matches) == 1:
+                    row = plate_matches[0]
+            return _rental(row) if row is not None else None
+
     def update_return_work_message(
         self,
         rental_id: int,
