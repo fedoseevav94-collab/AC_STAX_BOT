@@ -76,6 +76,7 @@ def start_menu(can_report: bool = False, can_admin: bool = False) -> InlineKeybo
         )
     if can_admin:
         rows.append([InlineKeyboardButton(text="Тарифы аренды", callback_data="admin:tariffs")])
+        rows.append([InlineKeyboardButton(text="Восстановить выдачу", callback_data="admin:restore_returned")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

@@ -396,6 +396,51 @@ class Storage:
                     row = plate_matches[0]
             return _rental(row) if row is not None else None
 
+    def restore_latest_returned_by_plate(self, plate: str) -> Rental | None:
+        normalized_plate = normalize_plate(plate)
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM rentals
+                WHERE status = 'returned'
+                    AND COALESCE(approval_status, 'approved') != 'test_drive'
+                ORDER BY returned_at DESC, id DESC
+                """
+            ).fetchall()
+            row = next(
+                (
+                    candidate
+                    for candidate in rows
+                    if normalize_plate(candidate["plate"]) == normalized_plate
+                    or normalize_plate(candidate["return_plate"] or "") == normalized_plate
+                ),
+                None,
+            )
+            if row is None:
+                return None
+            conn.execute(
+                """
+                UPDATE rentals
+                SET return_message_id = NULL,
+                    return_plate = NULL,
+                    photo_count_return = 0,
+                    return_comment = NULL,
+                    condition_status = NULL,
+                    status = 'taken',
+                    returned_at = NULL,
+                    return_user_id = NULL,
+                    return_username = NULL,
+                    return_employee_name = NULL,
+                    return_work_chat_id = NULL,
+                    return_work_message_id = NULL,
+                    paid = 0
+                WHERE id = ?
+                """,
+                (row["id"],),
+            )
+            conn.commit()
+            return self.get_by_id(row["id"])
+
     def update_return_work_message(
         self,
         rental_id: int,

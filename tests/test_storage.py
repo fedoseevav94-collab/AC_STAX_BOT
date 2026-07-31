@@ -145,6 +145,50 @@ def test_find_return_candidate_does_not_close_rental(tmp_path):
     assert rental.returned_at is None
 
 
+def test_restore_latest_returned_by_plate_reopens_rental(tmp_path):
+    db_path = tmp_path / "bot.sqlite3"
+    storage = Storage(str(db_path))
+    rental_id = storage.create_take(
+        chat_id=111,
+        message_id=2,
+        user_id=777,
+        username="driver",
+        employee_name="Александр Михно",
+        model="HYUNDAI SONATA",
+        plate="В820НУ172",
+        days=1,
+        return_text="завтра",
+        planned_return_at="2026-07-22T10:00",
+        night_shift=False,
+        photo_count=5,
+        total=1700,
+        created_at="2026-07-21T10:00:00",
+    )
+    storage.set_approval_status(rental_id, "approved")
+    storage.mark_returned(
+        chat_id=222,
+        message_id=9,
+        plate="В820НУ172",
+        photo_count=5,
+        return_comment="Машина полностью исправна",
+        condition_status="ok",
+        user_id=888,
+        username="manager",
+        employee_name="Александр Михно",
+    )
+
+    rental = storage.restore_latest_returned_by_plate("B820HY172")
+
+    assert rental is not None
+    assert rental.id == rental_id
+    assert rental.status == "taken"
+    assert rental.returned_at is None
+    assert rental.return_user_id is None
+    assert rental.return_comment is None
+    assert rental.return_plate is None
+    assert rental.paid is False
+
+
 def test_return_plate_can_be_corrected(tmp_path):
     db_path = tmp_path / "bot.sqlite3"
     storage = Storage(str(db_path))

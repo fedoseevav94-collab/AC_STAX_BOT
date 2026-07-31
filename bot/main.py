@@ -99,6 +99,10 @@ class ReturnPlateCorrectionFlow(StatesGroup):
     plate = State()
 
 
+class AdminRestoreFlow(StatesGroup):
+    plate = State()
+
+
 class TestDriveFlow(StatesGroup):
     model = State()
     plate = State()
@@ -581,6 +585,23 @@ def active_rentals_text() -> str:
     return "\n".join(lines)
 
 
+def restore_rental_by_plate_text(plate_text: str) -> str:
+    plate = normalize_plate(plate_text)
+    if not is_valid_plate(plate):
+        return "Не понял госномер. Введите номер в формате А123ВС77 или А123ВС777, например: В820НУ172."
+    rental = storage.restore_latest_returned_by_plate(plate)
+    if rental is None:
+        return f"По номеру {plate} не нашел закрытую аренду, которую можно восстановить."
+    return "\n".join(
+        [
+            f"Выдача #{rental.rental_no or rental.id} восстановлена в активные.",
+            f"Авто: {rental.model} {rental.plate}",
+            f"Брал: {actor_label(rental.employee_name, rental.username, rental.user_id)}",
+            f"Дата выдачи: {format_dt(rental.created_at)}",
+        ]
+    )
+
+
 async def process_messages(messages: list[Message]) -> None:
     text_message = next((message for message in messages if message.caption or message.text), messages[0])
     text = text_message.caption or text_message.text or ""
@@ -776,6 +797,18 @@ async def active_rentals_command(message: Message) -> None:
     await message.answer(active_rentals_text())
 
 
+@dp.message(Command("restore_rental"))
+async def restore_rental_command(message: Message) -> None:
+    if not is_admin_message(message):
+        await message.reply("Восстановить выдачу может только администратор.")
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.reply("Укажите госномер: `/restore_rental В820НУ172`.")
+        return
+    await message.answer(restore_rental_by_plate_text(parts[1]))
+
+
 @dp.message(Command("tariffs"))
 async def tariffs_command(message: Message) -> None:
     if not is_admin_message(message):
@@ -947,6 +980,27 @@ async def tariffs_button(callback: CallbackQuery) -> None:
         return
     await callback.message.answer(tariff_summary_text(), reply_markup=tariff_controls())
     await callback.answer()
+
+
+@dp.callback_query(F.data == "admin:restore_returned")
+async def restore_returned_button(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin_control_user(callback):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(AdminRestoreFlow.plate)
+    await callback.message.answer("Введите госномер выдачи, которую нужно вернуть в активные, например: В820НУ172")
+    await callback.answer()
+
+
+@dp.message(AdminRestoreFlow.plate)
+async def restore_returned_plate(message: Message, state: FSMContext) -> None:
+    if not is_admin_message(message):
+        await message.answer("Восстановить выдачу может только администратор.")
+        await state.clear()
+        return
+    await message.answer(restore_rental_by_plate_text(message.text or ""))
+    await state.clear()
 
 
 @dp.callback_query(F.data.startswith("tariff:set:"))
