@@ -56,12 +56,14 @@ HELP_TEXT = """Форматы:
 """
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
-ADMIN_CONTROL_USERNAMES = {"fedos_av"}
+DEFAULT_ADMIN_USERNAMES = {"fedos_av"}
 PENDING_APPROVAL_STATUSES = {"pending", "resubmitted"}
 REMINDER_BEFORE_RETURN = timedelta(hours=2)
 REMINDER_CHECK_INTERVAL_SECONDS = 300
 AUTO_APPROVAL_AFTER = timedelta(minutes=15)
 AUTO_APPROVAL_CHECK_INTERVAL_SECONDS = 60
+HALF_DAY_MIN_HOURS = 10
+HALF_DAY_MAX_HOURS = 16
 POLLING_BACKOFF = BackoffConfig(min_delay=2.0, max_delay=30.0, factor=1.5, jitter=0.2)
 DEFAULT_TARIFFS = {
     "comfort_day": 1700,
@@ -154,8 +156,12 @@ def remember_user(user) -> None:
         storage.set_setting(f"user_id:{user.username.lower()}", str(user.id))
 
 
+def admin_control_usernames() -> set[str]:
+    return DEFAULT_ADMIN_USERNAMES | config.admin_usernames
+
+
 def is_admin_control_user(callback: CallbackQuery) -> bool:
-    return (callback_username(callback) or "") in ADMIN_CONTROL_USERNAMES
+    return (callback_username(callback) or "") in admin_control_usernames()
 
 
 def is_test_drive_rental(rental) -> bool:
@@ -190,7 +196,8 @@ def has_employee_name(user) -> bool:
 
 
 def is_approver(message: Message) -> bool:
-    return (username(message) or "") in config.approver_usernames or (username(message) or "") in config.admin_usernames
+    user_name = username(message) or ""
+    return user_name in config.approver_usernames or user_name in admin_control_usernames()
 
 
 def is_report_user(message: Message) -> bool:
@@ -202,11 +209,11 @@ def is_report_callback(callback: CallbackQuery) -> bool:
 
 
 def is_admin_message(message: Message) -> bool:
-    return (username(message) or "") in ADMIN_CONTROL_USERNAMES
+    return (username(message) or "") in admin_control_usernames()
 
 
 def is_admin_user_obj(user) -> bool:
-    return bool(user and user.username and user.username.lower() in ADMIN_CONTROL_USERNAMES)
+    return bool(user and user.username and user.username.lower() in admin_control_usernames())
 
 
 def is_rental_waiting_approval(rental) -> bool:
@@ -311,6 +318,37 @@ def work_chat_delivery_text(sent_messages: list[Message]) -> str:
     return "Не удалось отправить фото в рабочий чат. Проверьте настройки и логи бота."
 
 
+def approval_message_setting_key(rental_id: int, admin_username: str) -> str:
+    return f"approval_message:{rental_id}:{admin_username}"
+
+
+def auto_approval_admin_text(rental, sent_to_work_chat: bool) -> str:
+    return (
+        f"Заявка #{rental.rental_no or rental.id} одобрена автоматически через 15 минут.\n"
+        f"{rental.employee_name or 'Без ФИО'}: {rental.model} {rental.plate}\n"
+        f"Сумма: {0 if is_test_drive_rental(rental) else (rental.total or 0)} руб.\n"
+        + ("Заявка отправлена в рабочий чат." if sent_to_work_chat else "Заявка не отправлена в рабочий чат, проверьте настройки и логи бота.")
+    )
+
+
+async def mark_admin_approval_messages_auto_approved(bot: Bot, rental, sent_to_work_chat: bool) -> None:
+    text = auto_approval_admin_text(rental, sent_to_work_chat)
+    for admin_username in admin_control_usernames():
+        admin_user_id = storage.get_setting(f"user_id:{admin_username}")
+        message_id = storage.get_setting(approval_message_setting_key(rental.id, admin_username))
+        if not admin_user_id or not message_id:
+            continue
+        try:
+            await bot.edit_message_text(
+                chat_id=int(admin_user_id),
+                message_id=int(message_id),
+                text=text,
+                reply_markup=None,
+            )
+        except Exception:
+            logger.exception("Failed to mark admin approval message as auto approved for rental %s", rental.id)
+
+
 async def send_admin_approval_request(bot: Bot, rental, note: str = "Новая заявка на согласование.") -> bool:
     is_test_drive = is_test_drive_rental(rental)
     public_no = rental.rental_no or rental.id
@@ -321,12 +359,12 @@ async def send_admin_approval_request(bot: Bot, rental, note: str = "Новая 
         else rental.take_comment
     )
     sent = False
-    for admin_username in ADMIN_CONTROL_USERNAMES:
+    for admin_username in admin_control_usernames():
         admin_user_id = storage.get_setting(f"user_id:{admin_username}")
         if not admin_user_id:
             continue
         try:
-            await bot.send_message(
+            message = await bot.send_message(
                 chat_id=int(admin_user_id),
                 text="\n\n".join(
                     [
@@ -349,6 +387,7 @@ async def send_admin_approval_request(bot: Bot, rental, note: str = "Новая 
                 ),
                 reply_markup=admin_approval_controls(rental.id),
             )
+            storage.set_setting(approval_message_setting_key(rental.id, admin_username), str(message.message_id))
             sent = True
         except Exception:
             logger.exception("Failed to send approval request to admin %s for rental %s", admin_username, rental.id)
@@ -392,7 +431,7 @@ def rental_price(model: str, days: int, planned_return_at: str | None, started_a
             start = datetime.fromisoformat(started_at) if started_at else now_moscow()
             planned = datetime.fromisoformat(planned_return_at)
             hours = (planned - start).total_seconds() / 3600
-            if 10 <= hours <= 14:
+            if HALF_DAY_MIN_HOURS <= hours <= HALF_DAY_MAX_HOURS:
                 return half_day_rate, half_day_rate
         except ValueError:
             pass
@@ -1206,7 +1245,7 @@ async def admin_approve_amount_start(callback: CallbackQuery, state: FSMContext)
 
 @dp.message(AdminAmountFlow.amount)
 async def admin_set_amount_finish(message: Message, state: FSMContext) -> None:
-    if (username(message) or "") not in ADMIN_CONTROL_USERNAMES:
+    if (username(message) or "") not in admin_control_usernames():
         await message.answer("Недостаточно прав.")
         await state.clear()
         return
@@ -1907,7 +1946,7 @@ async def collect_or_process(message: Message) -> None:
 
 
 async def notify_admins(bot: Bot, text: str) -> None:
-    for admin_username in ADMIN_CONTROL_USERNAMES:
+    for admin_username in admin_control_usernames():
         admin_user_id = storage.get_setting(f"user_id:{admin_username}")
         if not admin_user_id:
             continue
@@ -1975,6 +2014,7 @@ async def auto_approval_loop(bot: Bot) -> None:
                 if rental is None:
                     continue
                 sent_to_work_chat = await publish_rental_to_work_chat(bot, rental)
+                await mark_admin_approval_messages_auto_approved(bot, rental, sent_to_work_chat)
                 logger.info(
                     "Rental %s auto approved after %s minutes. sent_to_work_chat=%s",
                     rental.id,

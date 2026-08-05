@@ -36,12 +36,14 @@ cp .env.example .env
 BOT_TOKEN=123456:telegram-token
 WORK_CHAT_ID=-1001234567890
 APPROVER_USERNAMES=sergey,stax_ru
-ADMIN_USERNAMES=your_username,stax_ru
+ADMIN_USERNAMES=Fedos_AV,username_leyla
 FREE_MODELS=JAC J7:10
 DRIVER_RATES=JAC J7:2400
 EXEMPT_USERNAMES=hussein,sasha_f
 DB_PATH=/app/data/car_rental_bot.sqlite3
 ```
+
+`ADMIN_USERNAMES` - пользователи с полным админским доступом: отчеты, тарифы, восстановление выдач, согласование заявок. Указывайте Telegram username без `@` или с `@`, оба варианта поддерживаются.
 
 Запуск:
 
