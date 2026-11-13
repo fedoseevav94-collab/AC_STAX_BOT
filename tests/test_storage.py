@@ -145,6 +145,65 @@ def test_find_return_candidate_does_not_close_rental(tmp_path):
     assert rental.returned_at is None
 
 
+def test_return_closes_current_employees_rental_when_plate_has_duplicates(tmp_path):
+    db_path = tmp_path / "bot.sqlite3"
+    storage = Storage(str(db_path))
+    armans_rental_id = storage.create_take(
+        chat_id=111,
+        message_id=2,
+        user_id=777,
+        username="pagorodu",
+        employee_name="Агаджанян Арман Андраникович",
+        model="HYUNDAI SONATA",
+        plate="А882СА761",
+        days=1,
+        return_text="завтра в 09:30",
+        planned_return_at="2026-11-13T09:30:00",
+        night_shift=True,
+        photo_count=5,
+        total=900,
+        created_at="2026-11-12T18:30:00",
+    )
+    duplicate_id = storage.create_take(
+        chat_id=222,
+        message_id=3,
+        user_id=888,
+        username="other",
+        employee_name="Другой сотрудник",
+        model="HYUNDAI SONATA",
+        plate="A882CA761",
+        days=1,
+        return_text="завтра",
+        planned_return_at="2026-11-13T09:30:00",
+        night_shift=True,
+        photo_count=5,
+        total=900,
+        created_at="2026-11-12T19:00:00",
+    )
+    storage.set_approval_status(armans_rental_id, "approved")
+    storage.set_approval_status(duplicate_id, "approved")
+
+    candidate = storage.find_return_candidate("A882CA761", 777)
+    returned = storage.mark_returned(
+        chat_id=333,
+        message_id=9,
+        plate="А882СА761",
+        photo_count=5,
+        return_comment="Машина полностью исправна",
+        condition_status="ok",
+        user_id=777,
+        username="pagorodu",
+        employee_name="Агаджанян Арман Андраникович",
+        rental_id=candidate.id if candidate else None,
+    )
+
+    assert candidate is not None
+    assert returned is not None
+    assert returned.id == armans_rental_id
+    assert storage.get_by_id(armans_rental_id).status == "returned"
+    assert storage.get_by_id(duplicate_id).status == "taken"
+
+
 def test_restore_latest_returned_by_plate_reopens_rental(tmp_path):
     db_path = tmp_path / "bot.sqlite3"
     storage = Storage(str(db_path))

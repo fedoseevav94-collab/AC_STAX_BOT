@@ -727,9 +727,11 @@ async def process_messages(messages: list[Message]) -> None:
 
     returned = parse_return(text)
     if returned:
-        block_message = return_plate_block_message(returned.plate, storage.rentals_by_plate(returned.plate))
-        if block_message:
-            await text_message.reply(block_message)
+        return_user_id = text_message.from_user.id if text_message.from_user else None
+        candidate = storage.find_return_candidate(returned.plate, return_user_id)
+        if candidate is None:
+            block_message = return_plate_block_message(returned.plate, storage.rentals_by_plate(returned.plate))
+            await text_message.reply(block_message or "Не нашел активную выдачу по этому номеру.")
             return
         if photos < 5:
             await text_message.reply(
@@ -743,13 +745,8 @@ async def process_messages(messages: list[Message]) -> None:
                 "Возврат не фиксирую."
             )
             return
-        return_user_id = text_message.from_user.id if text_message.from_user else None
         return_username = username(text_message)
         return_employee_name = employee_name(text_message)
-        candidate = storage.find_return_candidate(returned.plate, return_user_id)
-        if candidate is None:
-            await text_message.reply("Не нашел активную выдачу по этому номеру. Проверьте номер или формат.")
-            return
         model = returned.model or candidate.model
         days = returned.days or candidate.days
         preview = return_preview_rental(
@@ -782,6 +779,7 @@ async def process_messages(messages: list[Message]) -> None:
             user_id=return_user_id,
             username=return_username,
             employee_name=return_employee_name,
+            rental_id=candidate.id,
         )
         if rental is None:
             await text_message.reply("Фото отправлены в рабочий чат, но выдача уже изменилась. Обратитесь к ответственному.")
@@ -1570,7 +1568,7 @@ async def start_return(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     rentals = storage.active_for_user(callback.message.chat.id, callback.from_user.id)
     if len(rentals) == 1:
-        await state.update_data(plate=rentals[0].plate)
+        await state.update_data(plate=rentals[0].plate, rental_id=rentals[0].id)
         await state.set_state(ReturnFlow.condition)
         await callback.message.answer(
             f"Сдаем {rentals[0].model} {rentals[0].plate}. Опишите недостатки машины или нажмите кнопку:",
@@ -1706,11 +1704,13 @@ async def return_plate(message: Message, state: FSMContext) -> None:
     if not is_valid_plate(plate):
         await message.answer("Не понял госномер. Введите только номер, например: Н537РА126")
         return
-    block_message = return_plate_block_message(plate, storage.rentals_by_plate(plate))
-    if block_message:
-        await message.answer(block_message)
+    return_user_id = message.from_user.id if message.from_user else None
+    candidate = storage.find_return_candidate(plate, return_user_id)
+    if candidate is None:
+        block_message = return_plate_block_message(plate, storage.rentals_by_plate(plate))
+        await message.answer(block_message or "Не нашел активную выдачу по этому номеру.")
         return
-    await state.update_data(plate=plate)
+    await state.update_data(plate=plate, rental_id=candidate.id)
     await state.set_state(ReturnFlow.condition)
     await message.answer("Опишите недостатки машины или нажмите кнопку:", reply_markup=condition_menu())
 
@@ -1763,9 +1763,10 @@ async def return_photos(message: Message, state: FSMContext) -> None:
     return_user_id = message.from_user.id if message.from_user else None
     return_username = username(message)
     return_employee_name = employee_name(message)
-    candidate = storage.find_return_candidate(data["plate"], return_user_id)
-    if candidate is None:
-        await message.answer("Не нашел активную выдачу по этому номеру. Проверьте номер или обратитесь к ответственному.")
+    candidate_id = data.get("rental_id")
+    candidate = storage.get_by_id(candidate_id) if candidate_id else None
+    if candidate is None or not is_rental_returnable(candidate):
+        await message.answer("Выбранная выдача уже изменилась. Начните сдачу заново или обратитесь к ответственному.")
         await state.clear()
         return
     preview = return_preview_rental(
@@ -1797,6 +1798,7 @@ async def return_photos(message: Message, state: FSMContext) -> None:
         user_id=return_user_id,
         username=return_username,
         employee_name=return_employee_name,
+        rental_id=candidate.id,
     )
     if rental is None:
         await message.answer("Фото отправлены в рабочий чат, но выдача уже изменилась. Обратитесь к ответственному.")

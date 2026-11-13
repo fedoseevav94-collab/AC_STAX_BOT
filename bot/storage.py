@@ -299,39 +299,56 @@ class Storage:
         user_id: int | None = None,
         username: str | None = None,
         employee_name: str | None = None,
+        rental_id: int | None = None,
     ) -> Rental | None:
         with self.connect() as conn:
-            params: list[int] = []
-            user_filter = ""
-            if user_id is not None:
-                user_filter = "AND user_id = ?"
-                params.append(user_id)
-            rows = conn.execute(
-                f"""
-                SELECT * FROM rentals
-                WHERE status = 'taken'
-                    AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
-                    {user_filter}
-                ORDER BY id DESC
-                """,
-                params,
-            ).fetchall()
             normalized_plate = normalize_plate(plate)
-            row = next((candidate for candidate in rows if normalize_plate(candidate["plate"]) == normalized_plate), None)
-            if row is None and user_id is not None:
-                fallback_rows = conn.execute(
+            if rental_id is not None:
+                row = conn.execute(
                     """
+                    SELECT * FROM rentals
+                    WHERE id = ?
+                        AND status = 'taken'
+                        AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
+                    """,
+                    (rental_id,),
+                ).fetchone()
+                if row is not None and normalize_plate(row["plate"]) != normalized_plate:
+                    row = None
+            else:
+                params: list[int] = []
+                user_filter = ""
+                if user_id is not None:
+                    user_filter = "AND user_id = ?"
+                    params.append(user_id)
+                rows = conn.execute(
+                    f"""
                     SELECT * FROM rentals
                     WHERE status = 'taken'
                         AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
+                        {user_filter}
                     ORDER BY id DESC
-                    """
+                    """,
+                    params,
                 ).fetchall()
-                plate_matches = [
-                    candidate for candidate in fallback_rows if normalize_plate(candidate["plate"]) == normalized_plate
-                ]
-                if len(plate_matches) == 1:
-                    row = plate_matches[0]
+                row = next(
+                    (candidate for candidate in rows if normalize_plate(candidate["plate"]) == normalized_plate),
+                    None,
+                )
+                if row is None and user_id is not None:
+                    fallback_rows = conn.execute(
+                        """
+                        SELECT * FROM rentals
+                        WHERE status = 'taken'
+                            AND COALESCE(approval_status, 'approved') NOT IN ('pending', 'resubmitted', 'rejected', 'employee_cancelled')
+                        ORDER BY id DESC
+                        """
+                    ).fetchall()
+                    plate_matches = [
+                        candidate for candidate in fallback_rows if normalize_plate(candidate["plate"]) == normalized_plate
+                    ]
+                    if len(plate_matches) == 1:
+                        row = plate_matches[0]
             if row is None:
                 return None
             conn.execute(
